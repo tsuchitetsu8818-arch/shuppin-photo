@@ -492,3 +492,21 @@ footer small {
     font-size: 36px;
   }
 }
+/* Keep the actual JPEG available for Safari's native long-press menu. */
+.modal img {
+  max-height: none;
+  height: auto;
+  -webkit-touch-callout: default;
+  -webkit-user-select: auto;
+  user-select: auto;
+}
+.modal .save-help {
+  color: #344d3f;
+  font-size: 12px;
+}
+.modal .save-notice {
+  background: #f0f6ee;
+  padding: 12px;
+  border-radius: 8px;
+  color: #344d3f;
+}

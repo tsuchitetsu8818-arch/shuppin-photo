@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import {
   geometry,
   initialTransform,
@@ -51,6 +51,12 @@ export default function App() {
     [selected, setSelected] = useState(0),
     [error, setError] = useState(""),
     [busy, setBusy] = useState(false),
+    [sharing, setSharing] = useState(false),
+    [saveNotice, setSaveNotice] = useState(""),
+    [retry, setRetry] = useState(0),
+    [prepared, setPrepared] = useState<{ revision: object; file: File } | null>(
+      null,
+    ),
     [loading, setLoading] = useState(false),
     [result, setResult] = useState<{ url: string; file: File } | null>(null);
   const canvas = useRef<HTMLCanvasElement>(null),
@@ -71,6 +77,58 @@ export default function App() {
   const choices = layouts[photos.length] ?? [],
     layout = choices.find((l) => l.id === layoutId) ?? choices[0],
     rects = layout ? rectangles(layout, gap) : [];
+  // A different revision immediately makes an older JPEG ineligible for sharing.
+  const revision = useMemo(() => ({}), [photos, layoutId, gap, radius, bg]);
+  const ready = prepared?.revision === revision;
+  useEffect(() => {
+    let cancelled = false;
+    setPrepared(null);
+    if (photos.length < 2) {
+      setBusy(false);
+      return;
+    }
+    setBusy(true);
+    // Debounce editing; never encode inside the save button's user gesture.
+    const timer = window.setTimeout(() => {
+      try {
+        const c = document.createElement("canvas");
+        c.width = c.height = 2000;
+        draw(c.getContext("2d")!, 2000, photos, rects, bg, radius);
+        c.toBlob(
+          (blob) => {
+            if (cancelled) return;
+            if (blob) {
+              setPrepared({
+                revision,
+                file: new File([blob], `shuppin-photo-${Date.now()}.jpg`, {
+                  type: "image/jpeg",
+                }),
+              });
+              setSaveNotice("");
+            } else {
+              setSaveNotice(
+                "画像を作成できませんでした。編集内容は残っています。もう一度お試しください。",
+              );
+            }
+            setBusy(false);
+          },
+          "image/jpeg",
+          0.95,
+        );
+      } catch {
+        if (!cancelled) {
+          setSaveNotice(
+            "画像を作成できませんでした。編集内容は残っています。もう一度お試しください。",
+          );
+          setBusy(false);
+        }
+      }
+    }, 180);
+    return () => {
+      cancelled = true;
+      window.clearTimeout(timer);
+    };
+  }, [revision, retry]);
   useEffect(() => {
     const c = canvas.current;
     if (c) draw(c.getContext("2d")!, 1000, photos, rects, bg, radius);
@@ -172,41 +230,54 @@ export default function App() {
   function begin(index: number) {
     gesture.current = { index, t: { ...photos[index].t }, ...metrics() };
   }
-  async function save() {
-    setBusy(true);
-    setError("");
+  function canShare(file: File) {
     try {
-      const c = document.createElement("canvas");
-      c.width = c.height = 2000;
-      draw(c.getContext("2d")!, 2000, photos, rects, bg, radius);
-      const blob = await new Promise<Blob>((resolve, reject) =>
-        c.toBlob(
-          (b) =>
-            b ? resolve(b) : reject(Error("画像を作成できませんでした。")),
-          "image/jpeg",
-          0.95,
-        ),
+      return (
+        typeof navigator.share === "function" &&
+        typeof navigator.canShare === "function" &&
+        navigator.canShare({ files: [file] })
       );
-      const file = new File([blob], `shuppin-photo-${Date.now()}.jpg`, {
-        type: "image/jpeg",
-      });
-      invalidate();
-      setResult({ file, url: URL.createObjectURL(file) });
-    } catch (e) {
-      setError((e as Error).message);
-    } finally {
-      setBusy(false);
+    } catch {
+      return false;
     }
   }
-  async function share() {
-    if (!result) return;
+  function save() {
+    if (sharing) return;
+    if (!ready || !prepared) {
+      setRetry((n) => n + 1);
+      return;
+    }
+    const file = prepared.file;
+    // Keep a separately owned preview URL until the user closes/edits it.
+    if (resultRef.current) URL.revokeObjectURL(resultRef.current.url);
+    const next = { file, url: URL.createObjectURL(file) };
+    resultRef.current = next;
+    setResult(next);
+    setSaveNotice("");
+    if (canShare(file)) void share(file);
+    else
+      setSaveNotice(
+        "完成画像を長押しして保存、またはJPEGをダウンロードしてください。",
+      );
+  }
+  async function share(file: File) {
+    if (sharing) return;
+    setSharing(true);
+    setSaveNotice("");
     try {
-      await navigator.share({ files: [result.file], title: "出品フォト" });
+      // Call synchronously from the tap handler: no encoding/await before share.
+      await navigator.share({ files: [file] });
+      setSaveNotice(
+        "「画像を保存」が見つからない場合は、下の画像を長押しして保存してください。",
+      );
     } catch (e) {
-      if ((e as Error).name !== "AbortError")
-        setError(
-          "共有できませんでした。画像の長押し、またはダウンロードで保存してください。",
-        );
+      setSaveNotice(
+        (e as Error).name === "AbortError"
+          ? "共有を終了しました。画像は残っています。再共有、または長押しで保存できます。"
+          : "共有できませんでした。画像は残っています。再共有、または長押しで保存してください。",
+      );
+    } finally {
+      setSharing(false);
     }
   }
   return (
@@ -532,6 +603,11 @@ export default function App() {
             {error}
           </p>
         )}
+        {!result && saveNotice && (
+          <p className="error" role="status">
+            {saveNotice}
+          </p>
+        )}
       </main>
       <footer>
         <div>
@@ -540,10 +616,14 @@ export default function App() {
         </div>
         <button
           className="primary"
-          disabled={photos.length < 2 || busy || loading}
+          disabled={photos.length < 2 || busy || loading || sharing}
           onClick={() => void save()}
         >
-          {busy ? "作成中…" : "↓ 画像を保存"}
+          {busy
+            ? "画像を準備中…"
+            : photos.length >= 2 && !ready
+              ? "画像の作成を再試行"
+              : "↓ 画像を保存"}
         </button>
       </footer>
       {result && (
@@ -568,12 +648,25 @@ export default function App() {
               src={result.url}
               alt="完成した結合写真。長押しで保存できます"
             />
-            {typeof navigator.canShare === "function" &&
-              navigator.canShare({ files: [result.file] }) && (
-                <button className="primary" onClick={() => void share()}>
-                  共有メニューを開く
-                </button>
-              )}
+            <p className="save-help">
+              共有画面で「画像を保存」を選んでください。
+              <br />
+              見つからない場合は、この画像を長押しして保存できます。
+            </p>
+            {saveNotice && (
+              <p className="save-notice" role="status">
+                {saveNotice}
+              </p>
+            )}
+            {canShare(result.file) && (
+              <button
+                className="primary"
+                disabled={sharing}
+                onClick={() => void share(result.file)}
+              >
+                {sharing ? "共有中…" : "もう一度共有する"}
+              </button>
+            )}
             <a
               className="download"
               href={result.url}
