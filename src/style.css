@@ -586,3 +586,12 @@ a {
   padding-left: max(16px, env(safe-area-inset-left));
   padding-right: max(16px, env(safe-area-inset-right));
 }
+.canvas-area {
+  touch-action: none;
+  overscroll-behavior: contain;
+  -webkit-user-select: none;
+  user-select: none;
+}
+.slider input[aria-label="回転角度"] {
+  min-width: 60px;
+}

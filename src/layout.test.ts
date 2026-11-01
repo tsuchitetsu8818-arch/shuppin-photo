@@ -34,20 +34,11 @@ it("fills square with no gap", () => {
         1,
       );
 });
-it("clamps image pan to prevent exposed edges", () => {
-  for (const [iw, ih] of [
-    [100, 200],
-    [200, 100],
-    [100, 100],
-  ])
-    for (const zoom of [1, 3, 6]) {
-      const r = { x: 0, y: 0, w: 0.4, h: 0.6 };
-      for (const v of [-100, 100]) {
-        const g = geometry(iw, ih, r, { zoom, x: v, y: v });
-        expect(g.x).toBeLessThanOrEqual(0.000001);
-        expect(g.y).toBeLessThanOrEqual(0.000001);
-        expect(g.x + g.w).toBeGreaterThanOrEqual(r.w - 0.000001);
-        expect(g.y + g.h).toBeGreaterThanOrEqual(r.h - 0.000001);
-      }
-    }
+it("allows free translation and shrinking below cover", () => {
+  const r = { x: 0, y: 0, w: 0.4, h: 0.6 };
+  const g = geometry(100, 200, r, { zoom: 0.2, x: 2, y: -3, rotation: 45 });
+  expect(g.w).toBeCloseTo(0.08);
+  expect(g.h).toBeCloseTo(0.16);
+  expect(g.x).toBeCloseTo(2.16);
+  expect(g.y).toBeCloseTo(-2.78);
 });
