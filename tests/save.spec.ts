@@ -55,7 +55,7 @@ for (const mode of [
       .locator("input[type=file]")
       .setInputFiles(["public/icon-192.png", "public/icon-512.png"]);
     const save = page.getByRole("button", {
-      name: "↓ 画像を保存",
+      name: "保存",
       exact: true,
     });
     await expect(save).toBeEnabled();
@@ -137,12 +137,12 @@ test("JPEG generation failure leaves editing state and can be retried", async ({
   await expect(page.getByRole("status")).toContainText(
     "編集内容は残っています",
   );
-  await expect(page.locator(".thumb")).toHaveCount(2);
-  await page.getByRole("button", { name: "画像の作成を再試行" }).click();
+  await expect(page.locator(".empty-slot")).toHaveCount(0);
+  await page.getByRole("button", { name: "再試行" }).click();
   await expect(
-    page.getByRole("button", { name: "↓ 画像を保存", exact: true }),
+    page.getByRole("button", { name: "保存", exact: true }),
   ).toBeEnabled();
-  await page.getByRole("button", { name: "↓ 画像を保存", exact: true }).click();
+  await page.getByRole("button", { name: "保存", exact: true }).click();
   await expect(page.locator(".modal img")).toBeVisible();
 });
 
@@ -167,17 +167,16 @@ test("a delayed older JPEG never replaces the latest edit", async ({
   await page
     .locator("input[type=file]")
     .setInputFiles(["public/icon-192.png", "public/icon-512.png"]);
-  await expect(
-    page.getByRole("button", { name: "画像を準備中…" }),
-  ).toBeVisible();
+  await expect(page.getByRole("button", { name: "準備中…" })).toBeVisible();
   // Wait for the first encoder invocation, then edit while its callback is pending.
   await page.waitForTimeout(300);
+  await page.getByRole("tab", { name: "枠線・余白" }).click();
   await page.getByRole("button", { name: "黒", exact: true }).click();
   await expect(
-    page.getByRole("button", { name: "↓ 画像を保存", exact: true }),
+    page.getByRole("button", { name: "保存", exact: true }),
   ).toBeEnabled();
   await page.waitForTimeout(1100);
-  await page.getByRole("button", { name: "↓ 画像を保存", exact: true }).click();
+  await page.getByRole("button", { name: "保存", exact: true }).click();
   const pixel = await page.locator(".modal img").evaluate(async (e) => {
     const i = e as HTMLImageElement;
     await i.decode();

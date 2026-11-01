@@ -1,129 +1,149 @@
 import { test, expect } from "@playwright/test";
-test("mobile photo workflow exports 2000px JPEG and works offline", async ({
+const files = ["public/icon-192.png", "public/icon-512.png"];
+test("empty slots open picker for that slot, replacing never opens on drag", async ({
   page,
-  context,
 }) => {
-  const errors: string[] = [];
-  page.on("pageerror", (e) => errors.push(e.message));
-  const outgoing: string[] = [];
-  page.on("request", (r) => {
-    if (
-      !r.url().startsWith("http://127.0.0.1:4173") &&
-      !r.url().startsWith("blob:") &&
-      !r.url().startsWith("data:")
-    )
-      outgoing.push(r.url());
-  });
   await page.goto("/");
   await expect(
-    page.getByRole("button", { name: "↓ 画像を保存" }),
+    page.getByRole("button", { name: "保存", exact: true }),
   ).toBeDisabled();
-  const image = (color: string) => ({
-    name: `${color}.svg`,
-    mimeType: "image/svg+xml",
-    buffer: Buffer.from(
-      `<svg xmlns="http://www.w3.org/2000/svg" width="200" height="100"><rect width="100" height="100" fill="${color}"/><rect x="100" width="100" height="100" fill="white"/></svg>`,
-    ),
-  });
-  await page
-    .locator("input[type=file]")
-    .setInputFiles([image("red"), image("blue"), image("green")]);
+  for (const i of [2, 1]) {
+    const picker = page.waitForEvent("filechooser");
+    await page.getByRole("button", { name: `枠${i}に写真を追加` }).click();
+    const chooser = await picker;
+    expect(chooser.isMultiple()).toBe(false);
+    await chooser.setFiles(files[i - 1]);
+    await expect(
+      page.getByRole("button", { name: `枠${i}に写真を追加` }),
+    ).toHaveCount(0);
+  }
   await expect(
-    page.getByRole("button", { name: "上1＋下2", exact: true }),
-  ).toBeVisible();
-  await expect(page.locator(".thumb")).toHaveCount(3);
-  for (const label of ["上1＋下2", "左1＋右2", "縦3分割", "横3分割"])
-    await page.getByRole("button", { name: label, exact: true }).click();
-  await page.getByRole("button", { name: "写真3を選択", exact: true }).click();
-  await page.getByRole("button", { name: "前に移動", exact: true }).click();
-  await page.getByRole("button", { name: "差し替え", exact: true }).click();
-  await page.locator("input[type=file]").setInputFiles(image("purple"));
-  await page.locator("input[type=range]").first().fill("2");
-  const c = page.locator("canvas"),
-    box = (await c.boundingBox())!;
-  await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2);
+    page.getByRole("button", { name: "保存", exact: true }),
+  ).toBeEnabled();
+  let pickerCount = 0;
+  page.on("filechooser", () => pickerCount++);
+  const b = (await page.locator("canvas").boundingBox())!;
+  await page.mouse.move(b.x + b.width / 2, b.y + b.height / 4);
   await page.mouse.down();
-  await page.mouse.move(box.x + box.width * 0.7, box.y + box.height * 0.6);
+  await page.mouse.move(b.x + b.width / 2 + 20, b.y + b.height / 4 + 10);
   await page.mouse.up();
-  await page.getByRole("button", { name: "黒", exact: true }).click();
-  await page.getByRole("button", { name: "↓ 画像を保存" }).click();
-  await expect(page.getByRole("dialog")).toBeVisible();
-  const exported = await page.locator(".modal img").evaluate(async (el) => {
-    const img = el as HTMLImageElement;
-    await img.decode();
-    const blob = await fetch(img.src).then((r) => r.blob());
-    return {
-      width: img.naturalWidth,
-      height: img.naturalHeight,
-      type: blob.type,
-      size: blob.size,
-    };
-  });
-  expect(exported.width).toBe(2000);
-  expect(exported.height).toBe(2000);
-  expect(exported.type).toBe("image/jpeg");
-  expect(exported.size).toBeGreaterThan(1000);
-  const download = page.waitForEvent("download");
-  await page.getByRole("link", { name: "JPEGをダウンロード" }).click();
-  expect((await download).suggestedFilename()).toMatch(/\.jpg$/);
-  await page.getByRole("button", { name: "編集に戻る" }).click();
-  await page.getByRole("button", { name: "削除", exact: true }).click();
-  await expect(page.locator(".thumb")).toHaveCount(2);
-  await page.getByRole("button", { name: "＋ 追加", exact: true }).click();
-  await page
-    .locator("input[type=file]")
-    .setInputFiles([image("pink"), image("yellow"), image("orange")]);
-  await expect(page.locator(".thumb")).toHaveCount(5);
-  for (const label of ["上2＋下3", "上3＋下2", "上1＋下4"])
-    await page.getByRole("button", { name: label, exact: true }).click();
-  expect(
-    await page.evaluate(
-      () => document.documentElement.scrollWidth <= innerWidth,
-    ),
-  ).toBe(true);
-  await page.screenshot({ path: "test-results/mobile.png", fullPage: true });
-  await page.evaluate(async () => {
-    await navigator.serviceWorker.ready;
-  });
-  await page.reload();
-  await page.evaluate(async () => {
-    await navigator.serviceWorker.ready;
-  });
-  await context.setOffline(true);
-  await page.reload();
+  expect(pickerCount).toBe(0);
+  const chooser = page.waitForEvent("filechooser");
+  await page.getByRole("button", { name: "写真を差し替え" }).click();
+  await (await chooser).setFiles(files[1]);
   await expect(
-    page.getByRole("heading", { name: "写真をひとつに。" }),
-  ).toBeVisible();
-  expect(errors).toEqual([]);
-  expect(outgoing).toEqual([]);
+    page.getByRole("button", { name: "保存", exact: true }),
+  ).toBeEnabled();
 });
-test("rejects over five photos and invalid images", async ({ page }) => {
-  await page.goto("/");
-  const files = Array.from({ length: 6 }, (_, i) => ({
-    name: `${i}.png`,
-    mimeType: "image/png",
-    buffer: Buffer.from("bad"),
-  }));
-  await page.locator("input[type=file]").setInputFiles(files);
-  await expect(page.getByRole("alert")).toContainText("合計5枚");
-  await page.locator("input[type=file]").setInputFiles(files.slice(0, 2));
-  await expect(page.getByRole("alert")).toContainText("読み込めない");
-  await expect(page.locator(".thumb")).toHaveCount(0);
-});
-test("two touch points zoom a photo and reset restores its scale", async ({
+
+test("layouts and count changes keep all photos and their transforms", async ({
   page,
-  context,
 }) => {
   await page.goto("/");
   await page
     .locator("input[type=file]")
-    .setInputFiles(["public/icon-192.png", "public/icon-512.png"]);
-  await expect(page.locator("canvas")).toBeVisible();
-  await page.locator("canvas").scrollIntoViewIfNeeded();
-  const b = (await page.locator("canvas").boundingBox())!;
-  const client = await context.newCDPSession(page);
-  const x = b.x + b.width / 2,
+    .setInputFiles([...files, ...files, files[0]]);
+  await expect(
+    page.getByRole("button", { name: "5枚", exact: true }),
+  ).toHaveAttribute("aria-pressed", "true");
+  await page.getByRole("tab", { name: "調整", exact: true }).click();
+  const before = await page
+    .locator(".thumb img")
+    .evaluateAll((es) => es.map((e) => (e as HTMLImageElement).src));
+  await page.locator("input[type=range]").fill("2");
+  await page.getByRole("tab", { name: "レイアウト", exact: true }).click();
+  for (const name of ["上2＋下3", "上3＋下2", "上1＋下4"])
+    await page.getByRole("button", { name, exact: true }).click();
+  await page.getByRole("button", { name: "2枚", exact: true }).click();
+  await expect(page.getByText("枠の外に3枚保持中")).toBeVisible();
+  await expect(page.locator(".slot")).toHaveCount(2);
+  for (const name of ["上下", "左右"])
+    await page.getByRole("button", { name, exact: true }).click();
+  await page.getByRole("button", { name: "3枚", exact: true }).click();
+  for (const name of ["上1＋下2", "左1＋右2", "縦3分割", "横3分割"])
+    await page.getByRole("button", { name, exact: true }).click();
+  await page.getByRole("button", { name: "4枚", exact: true }).click();
+  for (const name of ["2 × 2", "上1＋下3"])
+    await page.getByRole("button", { name, exact: true }).click();
+  await page.getByRole("button", { name: "5枚", exact: true }).click();
+  await page.getByRole("tab", { name: "調整", exact: true }).click();
+  expect(
+    await page
+      .locator(".thumb img")
+      .evaluateAll((es) => es.map((e) => (e as HTMLImageElement).src)),
+  ).toEqual(before);
+  await expect(page.locator("input[type=range]")).toHaveValue("2");
+  await page.getByRole("button", { name: "後ろに移動" }).click();
+  const after = await page
+    .locator(".thumb img")
+    .evaluateAll((es) => es.map((e) => (e as HTMLImageElement).src));
+  expect(after[1]).toBe(before[0]);
+  await page.getByRole("button", { name: "削除", exact: true }).click();
+  await expect(page.locator(".empty-slot")).toHaveCount(1);
+  await expect(
+    page.getByRole("button", { name: "保存", exact: true }),
+  ).toBeDisabled();
+});
+
+for (const [width, height] of [
+  [320, 568],
+  [375, 667],
+  [390, 844],
+  [430, 932],
+])
+  test(`editor fits ${width}x${height}, only layout strip scrolls`, async ({
+    page,
+  }) => {
+    await page.setViewportSize({ width, height });
+    await page.goto("/");
+    await page.getByRole("button", { name: "3枚", exact: true }).click();
+    for (const tab of ["レイアウト", "枠線・余白", "調整"]) {
+      await page.getByRole("tab", { name: tab, exact: true }).click();
+      expect(
+        await page.evaluate(
+          ({ width, height }) => ({
+            horizontal: document.documentElement.scrollWidth <= width,
+            vertical: document.documentElement.scrollHeight <= height,
+          }),
+          { width, height },
+        ),
+      ).toEqual({ horizontal: true, vertical: true });
+      const b = (await page
+        .getByRole("button", { name: "保存", exact: true })
+        .boundingBox())!;
+      expect(b.y + b.height).toBeLessThanOrEqual(height);
+      const menu = (await page
+        .getByRole("tab", { name: tab, exact: true })
+        .boundingBox())!;
+      expect(menu.y + menu.height).toBeLessThanOrEqual(height);
+    }
+    await page.getByRole("tab", { name: "レイアウト", exact: true }).click();
+    const strip = page.locator(".layouts");
+    const overflows = await strip.evaluate(
+      (e) => e.scrollWidth > e.clientWidth,
+    );
+    expect(overflows).toBe(width < 404);
+    if (overflows) {
+      await strip.evaluate((e) => (e.scrollLeft = e.scrollWidth));
+      expect(await strip.evaluate((e) => e.scrollLeft)).toBeGreaterThan(0);
+    }
+    await page.getByRole("button", { name: "横3分割", exact: true }).click();
+    await page.screenshot({ path: `test-results/editor-${width}.png` });
+  });
+
+test("two touch points zoom and reset without opening a picker", async ({
+  page,
+  context,
+}) => {
+  await page.goto("/");
+  await page.locator("input[type=file]").setInputFiles(files);
+  await page.getByRole("tab", { name: "調整", exact: true }).click();
+  let pickers = 0;
+  page.on("filechooser", () => pickers++);
+  const b = (await page.locator("canvas").boundingBox())!,
+    x = b.x + b.width / 2,
     y = b.y + b.height / 4;
+  const client = await context.newCDPSession(page);
   const touch = (id: number, x: number, y: number) => ({
     id,
     x,
@@ -149,16 +169,66 @@ test("two touch points zoom a photo and reset restores its scale", async ({
     touchPoints: [],
   });
   await expect
-    .poll(
-      async () =>
-        +(await page.locator("input[type=range]").first().inputValue()),
-    )
+    .poll(async () => +(await page.locator("input[type=range]").inputValue()))
     .toBeGreaterThan(1.5);
+  expect(pickers).toBe(0);
   await page.getByRole("button", { name: "リセット", exact: true }).click();
-  await expect(page.locator("input[type=range]").first()).toHaveValue("1");
+  await expect(page.locator("input[type=range]")).toHaveValue("1");
+});
+
+test("JPEG download, offline startup, and no external requests", async ({
+  page,
+  context,
+}) => {
+  const errors: string[] = [],
+    external: string[] = [];
+  page.on("pageerror", (e) => errors.push(e.message));
+  page.on("request", (r) => {
+    if (!/^(http:\/\/127\.0\.0\.1:4173|blob:|data:)/.test(r.url()))
+      external.push(r.url());
+  });
+  await page.goto("/");
+  await page.locator("input[type=file]").setInputFiles(files);
+  await page.getByRole("button", { name: "保存", exact: true }).click();
+  await expect(page.getByRole("dialog")).toBeVisible();
+  const img = page.locator(".modal img");
   expect(
-    await page
-      .locator("canvas")
-      .evaluate((e) => getComputedStyle(e).touchAction),
-  ).toBe("none");
+    await img.evaluate(async (e) => {
+      const i = e as HTMLImageElement;
+      await i.decode();
+      return [
+        i.naturalWidth,
+        i.naturalHeight,
+        (await fetch(i.src).then((r) => r.blob())).type,
+      ];
+    }),
+  ).toEqual([2000, 2000, "image/jpeg"]);
+  const pending = page.waitForEvent("download");
+  await page.getByRole("link", { name: "JPEGをダウンロード" }).click();
+  expect((await pending).suggestedFilename()).toMatch(/\.jpg$/);
+  await page.evaluate(async () => {
+    await navigator.serviceWorker.ready;
+  });
+  await page.reload();
+  await context.setOffline(true);
+  await page.reload();
+  await expect(
+    page.getByRole("button", { name: "枠1に写真を追加" }),
+  ).toBeVisible();
+  expect(errors).toEqual([]);
+  expect(external).toEqual([]);
+});
+
+test("invalid and excess photos do not overwrite slots", async ({ page }) => {
+  await page.goto("/");
+  const bad = {
+    name: "bad.png",
+    mimeType: "image/png",
+    buffer: Buffer.from("bad"),
+  };
+  await page.locator("input[type=file]").setInputFiles(Array(6).fill(bad));
+  await expect(page.getByRole("alert")).toContainText("合計5枚");
+  await page.locator("input[type=file]").setInputFiles(bad);
+  await expect(page.getByRole("alert")).toContainText("読み込めない");
+  await expect(page.locator(".empty-slot")).toHaveCount(2);
 });
