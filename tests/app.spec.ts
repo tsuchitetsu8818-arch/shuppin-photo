@@ -50,7 +50,7 @@ test("layouts and count changes keep all photos and their transforms", async ({
   const before = await page
     .locator(".thumb img")
     .evaluateAll((es) => es.map((e) => (e as HTMLImageElement).src));
-  await page.locator("input[type=range]").fill("2");
+  await page.getByRole("slider", { name: "拡大", exact: true }).fill("2");
   await page.getByRole("tab", { name: "レイアウト", exact: true }).click();
   for (const name of ["上2＋下3", "上3＋下2", "上1＋下4"])
     await page.getByRole("button", { name, exact: true }).click();
@@ -72,7 +72,9 @@ test("layouts and count changes keep all photos and their transforms", async ({
       .locator(".thumb img")
       .evaluateAll((es) => es.map((e) => (e as HTMLImageElement).src)),
   ).toEqual(before);
-  await expect(page.locator("input[type=range]")).toHaveValue("2");
+  await expect(
+    page.getByRole("slider", { name: "拡大", exact: true }),
+  ).toHaveValue("2");
   await page.getByRole("button", { name: "後ろに移動" }).click();
   const after = await page
     .locator(".thumb img")
@@ -169,11 +171,18 @@ test("two touch points zoom and reset without opening a picker", async ({
     touchPoints: [],
   });
   await expect
-    .poll(async () => +(await page.locator("input[type=range]").inputValue()))
+    .poll(
+      async () =>
+        +(await page
+          .getByRole("slider", { name: "拡大", exact: true })
+          .inputValue()),
+    )
     .toBeGreaterThan(1.5);
   expect(pickers).toBe(0);
   await page.getByRole("button", { name: "リセット", exact: true }).click();
-  await expect(page.locator("input[type=range]")).toHaveValue("1");
+  await expect(
+    page.getByRole("slider", { name: "拡大", exact: true }),
+  ).toHaveValue("1");
 });
 
 test("JPEG download, offline startup, and no external requests", async ({
