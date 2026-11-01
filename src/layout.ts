@@ -49,13 +49,21 @@ export function rectangles(layout: Layout, gap: number): Rect[] {
     }),
   );
 }
-export type Transform = { zoom: number; x: number; y: number };
-export const initialTransform = (): Transform => ({ zoom: 1, x: 0, y: 0 });
+export type Transform = {
+  zoom: number;
+  x: number;
+  y: number;
+  rotation: number;
+};
+export const initialTransform = (): Transform => ({
+  zoom: 1,
+  x: 0,
+  y: 0,
+  rotation: 0,
+});
 export function geometry(iw: number, ih: number, r: Rect, t: Transform) {
   const scale = Math.max(r.w / iw, r.h / ih) * t.zoom;
   const w = iw * scale,
     h = ih * scale;
-  const x = Math.max(-(w - r.w) / 2, Math.min((w - r.w) / 2, t.x));
-  const y = Math.max(-(h - r.h) / 2, Math.min((h - r.h) / 2, t.y));
-  return { w, h, x: (r.w - w) / 2 + x, y: (r.h - h) / 2 + y };
+  return { w, h, x: (r.w - w) / 2 + t.x, y: (r.h - h) / 2 + t.y };
 }

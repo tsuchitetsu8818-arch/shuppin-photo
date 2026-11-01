@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import {
   geometry,
   initialTransform,
@@ -7,6 +7,13 @@ import {
   type Transform,
   type Rect,
 } from "./layout";
+import {
+  gestureTransform,
+  metrics,
+  minimumZoom,
+  normalizeAngle,
+  type GestureMetrics,
+} from "./transform";
 type Photo = { id: string; image: HTMLImageElement; url: string; t: Transform };
 function draw(
   ctx: CanvasRenderingContext2D,
@@ -32,10 +39,15 @@ function draw(
       Math.min(radius, r.w / 2, r.h / 2) * size,
     );
     ctx.clip();
+    ctx.translate(
+      (r.x + r.w / 2 + p.t.x) * size,
+      (r.y + r.h / 2 + p.t.y) * size,
+    );
+    ctx.rotate((p.t.rotation * Math.PI) / 180);
     ctx.drawImage(
       p.image,
-      (r.x + g.x) * size,
-      (r.y + g.y) * size,
+      (-g.w * size) / 2,
+      (-g.h * size) / 2,
       g.w * size,
       g.h * size,
     );
@@ -43,7 +55,9 @@ function draw(
   });
 }
 export default function App() {
-  const [photos, setPhotos] = useState<(Photo | null)[]>(Array(5).fill(null)),
+  const [photos, commitPhotos] = useState<(Photo | null)[]>(
+      Array(5).fill(null),
+    ),
     [count, setCount] = useState(2),
     [tab, setTab] = useState("layout"),
     [layoutId, setLayoutId] = useState(""),
@@ -54,6 +68,7 @@ export default function App() {
     [error, setError] = useState(""),
     [busy, setBusy] = useState(false),
     [sharing, setSharing] = useState(false),
+    [gestureActive, setGestureActive] = useState(false),
     [saveNotice, setSaveNotice] = useState(""),
     [retry, setRetry] = useState(0),
     [prepared, setPrepared] = useState<{ revision: object; file: File } | null>(
@@ -66,19 +81,26 @@ export default function App() {
     replacement = useRef<number | null>(null),
     photoRef = useRef(photos),
     resultRef = useRef(result);
-  photoRef.current = photos;
   resultRef.current = result;
-  const pointers = useRef(new Map<number, { x: number; y: number }>()),
-    gesture = useRef<{
-      index: number;
-      t: Transform;
-      cx: number;
-      cy: number;
-      distance: number;
-    } | null>(null);
+  const pointers = useRef(new Map<number, { x: number; y: number }>());
+  const gesture = useRef<{
+    index: number;
+    t: Transform;
+    metrics: GestureMetrics;
+  } | null>(null);
+  const frame = useRef<number | null>(null);
+  const suppressEmptyTap = useRef(false);
   const choices = layouts[count] ?? [],
     layout = choices.find((l) => l.id === layoutId) ?? choices[0],
     rects = layout ? rectangles(layout, gap) : [];
+  const selectedPhoto = photos[selected];
+  const minZoom = selectedPhoto
+    ? minimumZoom(
+        selectedPhoto.image.naturalWidth,
+        selectedPhoto.image.naturalHeight,
+        rects[selected],
+      )
+    : 0.05;
   const complete = photos.slice(0, count).every(Boolean);
   const hiddenCount = photos.slice(count).filter(Boolean).length;
   // A different revision immediately makes an older JPEG ineligible for sharing.
@@ -95,6 +117,7 @@ export default function App() {
       return;
     }
     setBusy(true);
+    if (gestureActive) return;
     // Debounce editing; never encode inside the save button's user gesture.
     const timer = window.setTimeout(() => {
       try {
@@ -135,13 +158,14 @@ export default function App() {
       cancelled = true;
       window.clearTimeout(timer);
     };
-  }, [revision, retry]);
-  useEffect(() => {
+  }, [revision, retry, gestureActive]);
+  useLayoutEffect(() => {
     const c = canvas.current;
     if (c) draw(c.getContext("2d")!, 1000, photos, rects, bg, radius);
   }, [photos, count, layoutId, gap, radius, bg]);
   useEffect(
     () => () => {
+      if (frame.current !== null) cancelAnimationFrame(frame.current);
       photoRef.current.forEach((p) => {
         if (p) URL.revokeObjectURL(p.url);
       });
@@ -155,11 +179,37 @@ export default function App() {
       return null;
     });
   }
-  function transform(t: Transform) {
+  function setPhotos(
+    update: (Photo | null)[] | ((old: (Photo | null)[]) => (Photo | null)[]),
+  ) {
+    const next =
+      typeof update === "function" ? update(photoRef.current) : update;
+    photoRef.current = next;
+    commitPhotos(next);
+  }
+  function updateTransform(index: number, t: Transform, immediate = false) {
     invalidate();
-    setPhotos((old) =>
-      old.map((p, i) => (i === selected && p ? { ...p, t } : p)),
+    photoRef.current = photoRef.current.map((p, i) =>
+      i === index && p ? { ...p, t } : p,
     );
+    if (immediate) {
+      flushFrame();
+      return;
+    }
+    if (frame.current === null)
+      frame.current = requestAnimationFrame(() => {
+        frame.current = null;
+        setPhotos(photoRef.current);
+      });
+  }
+  function flushFrame() {
+    if (frame.current !== null) cancelAnimationFrame(frame.current);
+    frame.current = null;
+    setPhotos(photoRef.current);
+  }
+  function transform(t: Transform) {
+    stopGesture();
+    updateTransform(selected, t, true);
   }
   async function load(files: FileList | null) {
     if (!files?.length) return;
@@ -221,6 +271,7 @@ export default function App() {
     }
   }
   function pick(index: number | null) {
+    stopGesture();
     replacement.current = index;
     if (input.current) {
       input.current.multiple = index === null;
@@ -228,6 +279,7 @@ export default function App() {
     }
   }
   function move(delta: number) {
+    stopGesture();
     const target = selected + delta;
     if (target < 0 || target >= count) return;
     invalidate();
@@ -238,17 +290,27 @@ export default function App() {
     });
     setSelected(target);
   }
-  function metrics() {
-    const ps = [...pointers.current.values()];
-    return {
-      cx: ps.reduce((s, p) => s + p.x, 0) / ps.length,
-      cy: ps.reduce((s, p) => s + p.y, 0) / ps.length,
-      distance:
-        ps.length > 1 ? Math.hypot(ps[0].x - ps[1].x, ps[0].y - ps[1].y) : 0,
+  function begin(index: number) {
+    gesture.current = {
+      index,
+      t: { ...photoRef.current[index]!.t },
+      metrics: metrics([...pointers.current.values()]),
     };
   }
-  function begin(index: number) {
-    gesture.current = { index, t: { ...photos[index]!.t }, ...metrics() };
+  function releasePointer(id: number) {
+    if (!pointers.current.delete(id)) return;
+    flushFrame();
+    if (pointers.current.size && gesture.current) begin(gesture.current.index);
+    else {
+      gesture.current = null;
+      setGestureActive(false);
+    }
+  }
+  function stopGesture() {
+    flushFrame();
+    pointers.current.clear();
+    gesture.current = null;
+    setGestureActive(false);
   }
   function canShare(file: File) {
     try {
@@ -262,7 +324,7 @@ export default function App() {
     }
   }
   function save() {
-    if (sharing) return;
+    if (sharing || pointers.current.size) return;
     if (!ready || !prepared) {
       setRetry((n) => n + 1);
       return;
@@ -303,8 +365,7 @@ export default function App() {
   function selectCount(next: number) {
     setCount(next);
     setSelected((i) => Math.min(i, next - 1));
-    pointers.current.clear();
-    gesture.current = null;
+    stopGesture();
     invalidate();
   }
   return (
@@ -316,88 +377,72 @@ export default function App() {
         <span className="output-label">2000 × 2000</span>
         <button
           className="primary save-button"
-          disabled={!complete || busy || loading || sharing}
+          disabled={!complete || busy || loading || sharing || gestureActive}
           onClick={save}
         >
           {busy ? "準備中…" : complete && !ready ? "再試行" : "保存"}
         </button>
       </header>
       <main className="stage">
-        <div className="canvas-area">
+        <div
+          className="canvas-area"
+          onPointerDown={(e) => {
+            if (pointers.current.size >= 2 || loading) return;
+            const b = e.currentTarget.getBoundingClientRect();
+            const point = {
+              x: (e.clientX - b.left) / b.width,
+              y: (e.clientY - b.top) / b.height,
+            };
+            let index = gesture.current?.index;
+            if (index === undefined) {
+              suppressEmptyTap.current = false;
+              index = rects.findIndex(
+                (r) =>
+                  point.x >= r.x &&
+                  point.x <= r.x + r.w &&
+                  point.y >= r.y &&
+                  point.y <= r.y + r.h,
+              );
+              if (index < 0 || !photoRef.current[index]) return;
+            } else suppressEmptyTap.current = true;
+            e.preventDefault();
+            e.currentTarget.setPointerCapture(e.pointerId);
+            pointers.current.set(e.pointerId, point);
+            setGestureActive(true);
+            setSelected(index);
+            begin(index);
+          }}
+          onPointerMove={(e) => {
+            const g = gesture.current;
+            if (!pointers.current.has(e.pointerId) || !g) return;
+            e.preventDefault();
+            const b = e.currentTarget.getBoundingClientRect();
+            pointers.current.set(e.pointerId, {
+              x: (e.clientX - b.left) / b.width,
+              y: (e.clientY - b.top) / b.height,
+            });
+            const p = photoRef.current[g.index]!,
+              r = rects[g.index];
+            updateTransform(
+              g.index,
+              gestureTransform(
+                g.t,
+                g.metrics,
+                metrics([...pointers.current.values()]),
+                r,
+                minimumZoom(p.image.naturalWidth, p.image.naturalHeight, r),
+              ),
+            );
+          }}
+          onPointerUp={(e) => releasePointer(e.pointerId)}
+          onPointerCancel={(e) => releasePointer(e.pointerId)}
+          onLostPointerCapture={(e) => releasePointer(e.pointerId)}
+        >
           <canvas
             ref={canvas}
-            aria-label="結合写真プレビュー。指で移動、2本指で拡大縮小"
+            aria-label="結合写真プレビュー。指で移動、2本指で拡大縮小・回転"
             width="1000"
             height="1000"
-            onPointerDown={(e) => {
-              if (pointers.current.size >= 2) return;
-              const b = e.currentTarget.getBoundingClientRect(),
-                x = (e.clientX - b.left) / b.width,
-                y = (e.clientY - b.top) / b.height;
-              const index = rects.findIndex(
-                (r) => x >= r.x && x <= r.x + r.w && y >= r.y && y <= r.y + r.h,
-              );
-              if (index < 0 || !photos[index] || loading) return;
-              e.currentTarget.setPointerCapture(e.pointerId);
-              pointers.current.set(e.pointerId, { x, y });
-              const active = gesture.current?.index ?? index;
-              setSelected(active);
-              begin(active);
-            }}
-            onPointerMove={(e) => {
-              if (!pointers.current.has(e.pointerId) || !gesture.current)
-                return;
-              const b = e.currentTarget.getBoundingClientRect();
-              pointers.current.set(e.pointerId, {
-                x: (e.clientX - b.left) / b.width,
-                y: (e.clientY - b.top) / b.height,
-              });
-              const m = metrics(),
-                g = gesture.current,
-                zoom = Math.max(
-                  1,
-                  Math.min(
-                    6,
-                    g.t.zoom *
-                      (g.distance && m.distance ? m.distance / g.distance : 1),
-                  ),
-                );
-              invalidate();
-              setPhotos((old) =>
-                old.map((p, i) => {
-                  if (i !== g.index || !p) return p;
-                  const r = rects[i],
-                    pos = geometry(
-                      p.image.naturalWidth,
-                      p.image.naturalHeight,
-                      r,
-                      {
-                        zoom,
-                        x: g.t.x + m.cx - g.cx,
-                        y: g.t.y + m.cy - g.cy,
-                      },
-                    );
-                  return {
-                    ...p,
-                    t: {
-                      zoom,
-                      x: pos.x - (r.w - pos.w) / 2,
-                      y: pos.y - (r.h - pos.h) / 2,
-                    },
-                  };
-                }),
-              );
-            }}
-            onPointerUp={(e) => {
-              pointers.current.delete(e.pointerId);
-              if (pointers.current.size && gesture.current)
-                begin(gesture.current.index);
-              else gesture.current = null;
-            }}
-            onPointerCancel={() => {
-              pointers.current.clear();
-              gesture.current = null;
-            }}
           />
           <div className="slot-overlays">
             {rects.map((r, i) => (
@@ -418,7 +463,9 @@ export default function App() {
                     className="empty-slot"
                     disabled={loading}
                     aria-label={`枠${i + 1}に写真を追加`}
-                    onClick={() => pick(i)}
+                    onClick={() => {
+                      if (!suppressEmptyTap.current) pick(i);
+                    }}
                   >
                     <span>＋</span>
                     <small>写真を追加</small>
@@ -442,7 +489,7 @@ export default function App() {
             {photos[selected] ? "写真を差し替え" : "この枠に追加"}
           </button>
         </div>
-        <p className="gesture-hint">ドラッグで移動 · 2本指で拡大縮小</p>
+        <p className="gesture-hint">ドラッグで移動 · 2本指で拡大縮小・回転</p>
         {error && (
           <p className="notice error" role="alert">
             {error}
@@ -513,8 +560,7 @@ export default function App() {
                     aria-pressed={layout.id === l.id}
                     onClick={() => {
                       setLayoutId(l.id);
-                      pointers.current.clear();
-                      gesture.current = null;
+                      stopGesture();
                       invalidate();
                     }}
                   >
@@ -600,7 +646,10 @@ export default function App() {
                     key={i}
                     className={`thumb ${selected === i ? "selected" : ""}`}
                     aria-label={`写真${i + 1}を選択`}
-                    onClick={() => setSelected(i)}
+                    onClick={() => {
+                      stopGesture();
+                      setSelected(i);
+                    }}
                   >
                     {p ? (
                       <img src={p.url} alt={`選択した写真 ${i + 1}`} />
@@ -615,9 +664,10 @@ export default function App() {
                 拡大
                 <input
                   type="range"
-                  min="1"
+                  aria-label="拡大"
+                  min={minZoom}
                   max="6"
-                  step=".01"
+                  step="any"
                   disabled={!photos[selected]}
                   value={photos[selected]?.t.zoom ?? 1}
                   onChange={(e) =>
@@ -629,6 +679,36 @@ export default function App() {
                   onClick={() => transform(initialTransform())}
                 >
                   リセット
+                </button>
+              </label>
+              <label className="slider">
+                回転
+                <input
+                  aria-label="回転角度"
+                  type="range"
+                  min="-180"
+                  max="180"
+                  step="1"
+                  disabled={!selectedPhoto}
+                  value={selectedPhoto?.t.rotation ?? 0}
+                  onChange={(e) =>
+                    transform({
+                      ...selectedPhoto!.t,
+                      rotation: +e.target.value,
+                    })
+                  }
+                />
+                <span>{Math.round(selectedPhoto?.t.rotation ?? 0)}°</span>
+                <button
+                  disabled={!selectedPhoto}
+                  onClick={() =>
+                    transform({
+                      ...selectedPhoto!.t,
+                      rotation: normalizeAngle(selectedPhoto!.t.rotation + 90),
+                    })
+                  }
+                >
+                  90°回転
                 </button>
               </label>
               <div className="photo-tools">
@@ -650,6 +730,7 @@ export default function App() {
                 <button
                   disabled={!photos[selected] || loading}
                   onClick={() => {
+                    stopGesture();
                     invalidate();
                     URL.revokeObjectURL(photos[selected]!.url);
                     setPhotos((old) =>
