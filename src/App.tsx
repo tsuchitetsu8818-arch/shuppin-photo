@@ -11,7 +11,7 @@ type Photo = { id: string; image: HTMLImageElement; url: string; t: Transform };
 function draw(
   ctx: CanvasRenderingContext2D,
   size: number,
-  photos: Photo[],
+  photos: (Photo | null)[],
   rects: Rect[],
   bg: string,
   radius: number,
@@ -20,7 +20,7 @@ function draw(
   ctx.fillRect(0, 0, size, size);
   photos.forEach((p, i) => {
     const r = rects[i];
-    if (!r) return;
+    if (!r || !p) return;
     const g = geometry(p.image.naturalWidth, p.image.naturalHeight, r, p.t);
     ctx.save();
     ctx.beginPath();
@@ -43,7 +43,9 @@ function draw(
   });
 }
 export default function App() {
-  const [photos, setPhotos] = useState<Photo[]>([]),
+  const [photos, setPhotos] = useState<(Photo | null)[]>(Array(5).fill(null)),
+    [count, setCount] = useState(2),
+    [tab, setTab] = useState("layout"),
     [layoutId, setLayoutId] = useState(""),
     [gap, setGap] = useState(0.012),
     [radius, setRadius] = useState(0),
@@ -74,16 +76,21 @@ export default function App() {
       cy: number;
       distance: number;
     } | null>(null);
-  const choices = layouts[photos.length] ?? [],
+  const choices = layouts[count] ?? [],
     layout = choices.find((l) => l.id === layoutId) ?? choices[0],
     rects = layout ? rectangles(layout, gap) : [];
+  const complete = photos.slice(0, count).every(Boolean);
+  const hiddenCount = photos.slice(count).filter(Boolean).length;
   // A different revision immediately makes an older JPEG ineligible for sharing.
-  const revision = useMemo(() => ({}), [photos, layoutId, gap, radius, bg]);
+  const revision = useMemo(
+    () => ({}),
+    [photos, count, layoutId, gap, radius, bg],
+  );
   const ready = prepared?.revision === revision;
   useEffect(() => {
     let cancelled = false;
     setPrepared(null);
-    if (photos.length < 2) {
+    if (!complete) {
       setBusy(false);
       return;
     }
@@ -132,10 +139,12 @@ export default function App() {
   useEffect(() => {
     const c = canvas.current;
     if (c) draw(c.getContext("2d")!, 1000, photos, rects, bg, radius);
-  }, [photos, layoutId, gap, radius, bg]);
+  }, [photos, count, layoutId, gap, radius, bg]);
   useEffect(
     () => () => {
-      photoRef.current.forEach((p) => URL.revokeObjectURL(p.url));
+      photoRef.current.forEach((p) => {
+        if (p) URL.revokeObjectURL(p.url);
+      });
       if (resultRef.current) URL.revokeObjectURL(resultRef.current.url);
     },
     [],
@@ -148,14 +157,20 @@ export default function App() {
   }
   function transform(t: Transform) {
     invalidate();
-    setPhotos((old) => old.map((p, i) => (i === selected ? { ...p, t } : p)));
+    setPhotos((old) =>
+      old.map((p, i) => (i === selected && p ? { ...p, t } : p)),
+    );
   }
   async function load(files: FileList | null) {
     if (!files?.length) return;
     const index = replacement.current;
     replacement.current = null;
     const list = Array.from(files);
-    if (index === null ? photos.length + list.length > 5 : list.length !== 1) {
+    if (
+      index === null
+        ? photos.filter(Boolean).length + list.length > 5
+        : list.length !== 1
+    ) {
       setError("写真は合計5枚まで。差し替えは1枚選んでください。");
       return;
     }
@@ -185,13 +200,18 @@ export default function App() {
         }
       }
       invalidate();
-      if (index !== null) URL.revokeObjectURL(photos[index].url);
-      setPhotos((old) =>
-        index === null
-          ? [...old, ...added]
-          : old.map((p, i) => (i === index ? added[0] : p)),
-      );
-      setSelected(index ?? photos.length);
+      const next = [...photos];
+      let first = index ?? next.findIndex((p) => !p);
+      if (index !== null) {
+        if (next[index]) URL.revokeObjectURL(next[index]!.url);
+        next[index] = added[0];
+      } else {
+        for (const photo of added) next[next.findIndex((p) => !p)] = photo;
+        const last = next.reduce((last, p, i) => (p ? i : last), 1);
+        setCount(Math.max(count, last + 1));
+      }
+      setPhotos(next);
+      setSelected(first);
     } catch (e) {
       added.forEach((p) => URL.revokeObjectURL(p.url));
       setError((e as Error).message);
@@ -209,7 +229,7 @@ export default function App() {
   }
   function move(delta: number) {
     const target = selected + delta;
-    if (target < 0 || target >= photos.length) return;
+    if (target < 0 || target >= count) return;
     invalidate();
     setPhotos((old) => {
       const next = [...old];
@@ -228,7 +248,7 @@ export default function App() {
     };
   }
   function begin(index: number) {
-    gesture.current = { index, t: { ...photos[index].t }, ...metrics() };
+    gesture.current = { index, t: { ...photos[index]!.t }, ...metrics() };
   }
   function canShare(file: File) {
     try {
@@ -280,172 +300,339 @@ export default function App() {
       setSharing(false);
     }
   }
+  function selectCount(next: number) {
+    setCount(next);
+    setSelected((i) => Math.min(i, next - 1));
+    pointers.current.clear();
+    gesture.current = null;
+    invalidate();
+  }
   return (
-    <>
-      <header>
+    <div className="editor">
+      <header className="toolbar">
         <a className="brand" href="./">
-          <b>▦</b> 出品フォト <small>PHOTO COLLAGE</small>
+          <span className="brand-mark">▦</span> 出品フォト
         </a>
-        <span>◉ 端末内で処理</span>
+        <span className="output-label">2000 × 2000</span>
+        <button
+          className="primary save-button"
+          disabled={!complete || busy || loading || sharing}
+          onClick={save}
+        >
+          {busy ? "準備中…" : complete && !ready ? "再試行" : "保存"}
+        </button>
       </header>
-      <main>
-        <div className="intro">
-          <small>かんたん、きれいに、出品準備。</small>
-          <h1>写真をひとつに。</h1>
-          <p>2〜5枚を選んで、並べて、保存するだけ。</p>
-        </div>
-        <div className="steps">
-          01 写真を選ぶ <i>—</i> 02 かたちを選ぶ <i>—</i> 03 保存
-        </div>
-        <section className="workspace">
-          <div className="preview-shell">
-            {photos.length >= 2 ? (
-              <canvas
-                ref={canvas}
-                aria-label="結合写真プレビュー。指で移動、2本指で拡大縮小"
-                width="1000"
-                height="1000"
-                onPointerDown={(e) => {
-                  if (pointers.current.size >= 2) return;
-                  const b = e.currentTarget.getBoundingClientRect(),
-                    x = (e.clientX - b.left) / b.width,
-                    y = (e.clientY - b.top) / b.height;
-                  const index = rects.findIndex(
-                    (r) =>
-                      x >= r.x && x <= r.x + r.w && y >= r.y && y <= r.y + r.h,
-                  );
-                  if (index < 0) return;
-                  e.currentTarget.setPointerCapture(e.pointerId);
-                  pointers.current.set(e.pointerId, { x, y });
-                  const active = gesture.current?.index ?? index;
-                  setSelected(active);
-                  begin(active);
-                }}
-                onPointerMove={(e) => {
-                  if (!pointers.current.has(e.pointerId) || !gesture.current)
-                    return;
-                  const b = e.currentTarget.getBoundingClientRect();
-                  pointers.current.set(e.pointerId, {
-                    x: (e.clientX - b.left) / b.width,
-                    y: (e.clientY - b.top) / b.height,
-                  });
-                  const m = metrics(),
-                    g = gesture.current,
-                    zoom = Math.max(
-                      1,
-                      Math.min(
-                        6,
-                        g.t.zoom *
-                          (g.distance && m.distance
-                            ? m.distance / g.distance
-                            : 1),
-                      ),
+      <main className="stage">
+        <div className="canvas-area">
+          <canvas
+            ref={canvas}
+            aria-label="結合写真プレビュー。指で移動、2本指で拡大縮小"
+            width="1000"
+            height="1000"
+            onPointerDown={(e) => {
+              if (pointers.current.size >= 2) return;
+              const b = e.currentTarget.getBoundingClientRect(),
+                x = (e.clientX - b.left) / b.width,
+                y = (e.clientY - b.top) / b.height;
+              const index = rects.findIndex(
+                (r) => x >= r.x && x <= r.x + r.w && y >= r.y && y <= r.y + r.h,
+              );
+              if (index < 0 || !photos[index] || loading) return;
+              e.currentTarget.setPointerCapture(e.pointerId);
+              pointers.current.set(e.pointerId, { x, y });
+              const active = gesture.current?.index ?? index;
+              setSelected(active);
+              begin(active);
+            }}
+            onPointerMove={(e) => {
+              if (!pointers.current.has(e.pointerId) || !gesture.current)
+                return;
+              const b = e.currentTarget.getBoundingClientRect();
+              pointers.current.set(e.pointerId, {
+                x: (e.clientX - b.left) / b.width,
+                y: (e.clientY - b.top) / b.height,
+              });
+              const m = metrics(),
+                g = gesture.current,
+                zoom = Math.max(
+                  1,
+                  Math.min(
+                    6,
+                    g.t.zoom *
+                      (g.distance && m.distance ? m.distance / g.distance : 1),
+                  ),
+                );
+              invalidate();
+              setPhotos((old) =>
+                old.map((p, i) => {
+                  if (i !== g.index || !p) return p;
+                  const r = rects[i],
+                    pos = geometry(
+                      p.image.naturalWidth,
+                      p.image.naturalHeight,
+                      r,
+                      {
+                        zoom,
+                        x: g.t.x + m.cx - g.cx,
+                        y: g.t.y + m.cy - g.cy,
+                      },
                     );
-                  invalidate();
-                  setPhotos((old) =>
-                    old.map((p, i) => {
-                      if (i !== g.index) return p;
-                      const r = rects[i],
-                        pos = geometry(
-                          p.image.naturalWidth,
-                          p.image.naturalHeight,
-                          r,
-                          {
-                            zoom,
-                            x: g.t.x + m.cx - g.cx,
-                            y: g.t.y + m.cy - g.cy,
-                          },
-                        );
-                      return {
-                        ...p,
-                        t: {
-                          zoom,
-                          x: pos.x - (r.w - pos.w) / 2,
-                          y: pos.y - (r.h - pos.h) / 2,
-                        },
-                      };
-                    }),
-                  );
+                  return {
+                    ...p,
+                    t: {
+                      zoom,
+                      x: pos.x - (r.w - pos.w) / 2,
+                      y: pos.y - (r.h - pos.h) / 2,
+                    },
+                  };
+                }),
+              );
+            }}
+            onPointerUp={(e) => {
+              pointers.current.delete(e.pointerId);
+              if (pointers.current.size && gesture.current)
+                begin(gesture.current.index);
+              else gesture.current = null;
+            }}
+            onPointerCancel={() => {
+              pointers.current.clear();
+              gesture.current = null;
+            }}
+          />
+          <div className="slot-overlays">
+            {rects.map((r, i) => (
+              <div
+                key={i}
+                className={`slot ${selected === i && photos[i] ? "selected" : ""}`}
+                style={{
+                  left: `${r.x * 100}%`,
+                  top: `${r.y * 100}%`,
+                  width: `${r.w * 100}%`,
+                  height: `${r.h * 100}%`,
                 }}
-                onPointerUp={(e) => {
-                  pointers.current.delete(e.pointerId);
-                  if (pointers.current.size && gesture.current)
-                    begin(gesture.current.index);
-                  else gesture.current = null;
-                }}
-                onPointerCancel={() => {
-                  pointers.current.clear();
-                  gesture.current = null;
-                }}
-              />
-            ) : (
-              <button
-                className="empty"
-                onClick={() => pick(null)}
-                disabled={loading}
               >
-                <span className="empty-art">▧ ＋</span>
-                <strong>
-                  {photos.length ? "もう1枚選びましょう" : "出品する写真を選ぶ"}
-                </strong>
-                <span>写真を2〜5枚、まとめて選択できます</span>
-                <em>＋ 写真を選ぶ</em>
-                <small>写真は外部に送信しません</small>
-              </button>
-            )}
-            <span className="canvas-label">SQUARE · 1 : 1</span>
+                {photos[i] ? (
+                  <span className="slot-number">{i + 1}</span>
+                ) : (
+                  <button
+                    className="empty-slot"
+                    disabled={loading}
+                    aria-label={`枠${i + 1}に写真を追加`}
+                    onClick={() => pick(i)}
+                  >
+                    <span>＋</span>
+                    <small>写真を追加</small>
+                  </button>
+                )}
+              </div>
+            ))}
           </div>
-          <p className="hint">
-            {photos.length >= 2
-              ? "☝ 写真を指で移動 · 2本指で拡大縮小"
-              : "いつもの写真を、見やすい1枚に。"}
+        </div>
+        <div className="stage-caption">
+          <span>
+            {photos[selected]
+              ? `写真 ${selected + 1} を編集中`
+              : "空いている枠をタップ"}
+          </span>
+          <button
+            className="replace-button"
+            disabled={loading}
+            onClick={() => pick(selected)}
+          >
+            {photos[selected] ? "写真を差し替え" : "この枠に追加"}
+          </button>
+        </div>
+        <p className="gesture-hint">ドラッグで移動 · 2本指で拡大縮小</p>
+        {error && (
+          <p className="notice error" role="alert">
+            {error}
+            <button aria-label="エラーを閉じる" onClick={() => setError("")}>
+              ×
+            </button>
           </p>
-        </section>
-        <input
-          ref={input}
-          type="file"
-          accept="image/*"
-          multiple
-          hidden
-          onChange={(e) => void load(e.target.files)}
-        />
-        <section className="panel">
-          <div className="section-title">
-            <h2>
-              <span>01</span> 写真
-            </h2>
-            <small>{photos.length} / 5枚</small>
-          </div>
-          <div className="photos">
-            {photos.map((p, i) => (
+        )}
+        {!result && saveNotice && (
+          <p className="notice" role="status">
+            {saveNotice}
+          </p>
+        )}
+      </main>
+      <input
+        ref={input}
+        type="file"
+        accept="image/*"
+        multiple
+        hidden
+        onChange={(e) => void load(e.target.files)}
+      />
+      <section className="dock" aria-label="編集メニュー">
+        <div className="count-bar">
+          <span>写真の枚数</span>
+          <div className="count-options">
+            {[2, 3, 4, 5].map((n) => (
               <button
-                key={p.id}
-                className={`thumb ${selected === i ? "selected" : ""}`}
-                aria-label={`写真${i + 1}を選択`}
-                onClick={() => setSelected(i)}
+                key={n}
+                aria-pressed={count === n}
+                disabled={loading}
+                onClick={() => selectCount(n)}
               >
-                <img src={p.url} alt={`選択した写真 ${i + 1}`} />
-                <b>{i + 1}</b>
+                {n}枚
               </button>
             ))}
-            {photos.length < 5 && (
-              <button
-                className="add-photo"
-                disabled={loading}
-                onClick={() => pick(null)}
-              >
-                <b>＋</b>
-                <span>{loading ? "読込中…" : "追加"}</span>
-              </button>
-            )}
           </div>
-          {photos.length > 0 && (
+          <button
+            className="batch-add"
+            onClick={() => pick(null)}
+            disabled={loading || photos.every(Boolean)}
+            aria-label="写真をまとめて追加"
+          >
+            ＋ まとめて
+          </button>
+        </div>
+        <div
+          className="tool-panel"
+          role="tabpanel"
+          id={`panel-${tab}`}
+          aria-labelledby={`tab-${tab}`}
+        >
+          {tab === "layout" && (
             <>
+              <div className="panel-heading">
+                <span>レイアウトを選択</span>
+                <small>
+                  {hiddenCount
+                    ? `枠の外に${hiddenCount}枚保持中`
+                    : "写真は端末内だけで処理"}
+                </small>
+              </div>
+              <div className="layouts">
+                {choices.map((l) => (
+                  <button
+                    key={l.id}
+                    className={layout.id === l.id ? "chosen" : ""}
+                    aria-pressed={layout.id === l.id}
+                    onClick={() => {
+                      setLayoutId(l.id);
+                      pointers.current.clear();
+                      gesture.current = null;
+                      invalidate();
+                    }}
+                  >
+                    <svg viewBox="0 0 60 60" aria-hidden="true">
+                      {rectangles(l, 0.045).map((r, i) => (
+                        <rect
+                          key={i}
+                          x={r.x * 60}
+                          y={r.y * 60}
+                          width={r.w * 60}
+                          height={r.h * 60}
+                          rx="2"
+                        />
+                      ))}
+                    </svg>
+                    <span>{l.name}</span>
+                  </button>
+                ))}
+              </div>
+            </>
+          )}
+          {tab === "border" && (
+            <>
+              <div className="background">
+                <span>背景</span>
+                <div>
+                  {[
+                    ["#ffffff", "白"],
+                    ["#222222", "黒"],
+                    ["#d5d5d5", "グレー"],
+                  ].map(([color, name]) => (
+                    <button
+                      key={color}
+                      aria-pressed={bg === color}
+                      onClick={() => {
+                        setBg(color);
+                        invalidate();
+                      }}
+                    >
+                      <i style={{ background: color }} />
+                      {name}
+                    </button>
+                  ))}
+                </div>
+              </div>
+              <label className="slider">
+                余白
+                <input
+                  type="range"
+                  min="0"
+                  max=".04"
+                  step=".002"
+                  value={gap}
+                  onChange={(e) => {
+                    setGap(+e.target.value);
+                    invalidate();
+                  }}
+                />
+                <span>{Math.round(gap * 2000)}px</span>
+              </label>
+              <label className="slider">
+                角丸
+                <input
+                  type="range"
+                  min="0"
+                  max=".05"
+                  step=".002"
+                  value={radius}
+                  onChange={(e) => {
+                    setRadius(+e.target.value);
+                    invalidate();
+                  }}
+                />
+                <span>{Math.round(radius * 2000)}px</span>
+              </label>
+            </>
+          )}
+          {tab === "adjust" && (
+            <>
+              <div className="photos">
+                {photos.slice(0, count).map((p, i) => (
+                  <button
+                    key={i}
+                    className={`thumb ${selected === i ? "selected" : ""}`}
+                    aria-label={`写真${i + 1}を選択`}
+                    onClick={() => setSelected(i)}
+                  >
+                    {p ? (
+                      <img src={p.url} alt={`選択した写真 ${i + 1}`} />
+                    ) : (
+                      <span>＋</span>
+                    )}
+                    <b>{i + 1}</b>
+                  </button>
+                ))}
+              </div>
+              <label className="slider">
+                拡大
+                <input
+                  type="range"
+                  min="1"
+                  max="6"
+                  step=".01"
+                  disabled={!photos[selected]}
+                  value={photos[selected]?.t.zoom ?? 1}
+                  onChange={(e) =>
+                    transform({ ...photos[selected]!.t, zoom: +e.target.value })
+                  }
+                />
+                <button
+                  disabled={!photos[selected]}
+                  onClick={() => transform(initialTransform())}
+                >
+                  リセット
+                </button>
+              </label>
               <div className="photo-tools">
                 <span>写真 {selected + 1}</span>
-                <button onClick={() => pick(selected)} disabled={loading}>
-                  差し替え
-                </button>
                 <button
                   onClick={() => move(-1)}
                   disabled={selected === 0 || loading}
@@ -455,177 +642,47 @@ export default function App() {
                 </button>
                 <button
                   onClick={() => move(1)}
-                  disabled={selected === photos.length - 1 || loading}
+                  disabled={selected === count - 1 || loading}
                   aria-label="後ろに移動"
                 >
                   →
                 </button>
                 <button
-                  disabled={loading}
+                  disabled={!photos[selected] || loading}
                   onClick={() => {
                     invalidate();
-                    URL.revokeObjectURL(photos[selected].url);
-                    setPhotos((p) => p.filter((_, i) => i !== selected));
-                    setSelected(0);
+                    URL.revokeObjectURL(photos[selected]!.url);
+                    setPhotos((old) =>
+                      old.map((p, i) => (i === selected ? null : p)),
+                    );
                   }}
                 >
                   削除
                 </button>
               </div>
-              <label className="slider">
-                拡大
-                <input
-                  type="range"
-                  min="1"
-                  max="6"
-                  step=".01"
-                  value={photos[selected]?.t.zoom ?? 1}
-                  onChange={(e) =>
-                    transform({ ...photos[selected].t, zoom: +e.target.value })
-                  }
-                />
-                <button onClick={() => transform(initialTransform())}>
-                  リセット
-                </button>
-              </label>
             </>
           )}
-        </section>
-        <section className="panel">
-          <div className="section-title">
-            <h2>
-              <span>02</span> レイアウト
-            </h2>
-            <small>タップで切り替え</small>
-          </div>
-          {choices.length ? (
-            <div className="layouts">
-              {choices.map((l) => (
-                <button
-                  key={l.id}
-                  className={layout.id === l.id ? "chosen" : ""}
-                  onClick={() => {
-                    setLayoutId(l.id);
-                    setPhotos((p) =>
-                      p.map((v) => ({ ...v, t: initialTransform() })),
-                    );
-                    invalidate();
-                  }}
-                >
-                  <svg viewBox="0 0 60 60" aria-hidden="true">
-                    {rectangles(l, 0.055).map((r, i) => (
-                      <rect
-                        key={i}
-                        x={r.x * 60}
-                        y={r.y * 60}
-                        width={r.w * 60}
-                        height={r.h * 60}
-                        rx="2"
-                      />
-                    ))}
-                  </svg>
-                  <span>{l.name}</span>
-                </button>
-              ))}
-            </div>
-          ) : (
-            <p className="muted">写真を2枚以上選ぶと表示されます</p>
-          )}
-        </section>
-        <section className="panel">
-          <div className="section-title">
-            <h2>
-              <span>03</span> 仕上げ
-            </h2>
-            <small>お好みで調整</small>
-          </div>
-          <div className="background">
-            <span>背景</span>
-            <div>
-              {[
-                ["#ffffff", "白"],
-                ["#222222", "黒"],
-                ["#d5d5d5", "グレー"],
-              ].map(([color, name]) => (
-                <button
-                  key={color}
-                  aria-pressed={bg === color}
-                  className={bg === color ? "chosen" : ""}
-                  onClick={() => {
-                    setBg(color);
-                    invalidate();
-                  }}
-                >
-                  <i style={{ background: color }} />
-                  {name}
-                </button>
-              ))}
-            </div>
-          </div>
-          <label className="slider">
-            余白
-            <input
-              type="range"
-              min="0"
-              max=".04"
-              step=".002"
-              value={gap}
-              onChange={(e) => {
-                setGap(+e.target.value);
-                invalidate();
-              }}
-            />
-            <span>{Math.round(gap * 2000)}px</span>
-          </label>
-          <label className="slider">
-            角丸
-            <input
-              type="range"
-              min="0"
-              max=".05"
-              step=".002"
-              value={radius}
-              onChange={(e) => {
-                setRadius(+e.target.value);
-                invalidate();
-              }}
-            />
-            <span>{Math.round(radius * 2000)}px</span>
-          </label>
-        </section>
-        <p className="privacy">
-          ♧ 写真はこの端末の中だけで処理します。
-          <br />
-          登録不要・広告なし。色やロゴも、そのままに。
-        </p>
-        {error && (
-          <p className="error" role="alert">
-            {error}
-          </p>
-        )}
-        {!result && saveNotice && (
-          <p className="error" role="status">
-            {saveNotice}
-          </p>
-        )}
-      </main>
-      <footer>
-        <div>
-          <strong>きれいな1枚で、出品しよう。</strong>
-          <small>2000 × 2000 px · JPEG</small>
         </div>
-        <button
-          className="primary"
-          disabled={photos.length < 2 || busy || loading || sharing}
-          onClick={() => void save()}
-        >
-          {busy
-            ? "画像を準備中…"
-            : photos.length >= 2 && !ready
-              ? "画像の作成を再試行"
-              : "↓ 画像を保存"}
-        </button>
-      </footer>
+        <nav className="tool-tabs" role="tablist" aria-label="編集ツール">
+          {[
+            ["layout", "▦", "レイアウト"],
+            ["border", "▣", "枠線・余白"],
+            ["adjust", "☷", "調整"],
+          ].map(([id, icon, name]) => (
+            <button
+              key={id}
+              role="tab"
+              id={`tab-${id}`}
+              aria-selected={tab === id}
+              aria-controls={`panel-${id}`}
+              onClick={() => setTab(id)}
+            >
+              <span aria-hidden="true">{icon}</span>
+              {name}
+            </button>
+          ))}
+        </nav>
+      </section>
       {result && (
         <div className="modal-backdrop">
           <section
@@ -685,6 +742,6 @@ export default function App() {
           </section>
         </div>
       )}
-    </>
+    </div>
   );
 }
