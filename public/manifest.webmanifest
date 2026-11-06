@@ -2,12 +2,13 @@
   "id": "./",
   "name": "出品フォト",
   "short_name": "出品フォト",
+  "description": "出品写真をぱっとひとまとめ。端末内で編集できるコラージュアプリ。",
   "lang": "ja",
   "start_url": "./",
   "scope": "./",
   "display": "standalone",
-  "background_color": "#f7f6f2",
-  "theme_color": "#f7f6f2",
+  "background_color": "#f8f7f3",
+  "theme_color": "#f8f7f3",
   "icons": [
     {
       "src": "icon-192.png",

@@ -1,828 +1,654 @@
-import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
+import { EditorCanvas } from "./EditorCanvas";
 import {
-  geometry,
   initialTransform,
   layouts,
-  rectangles,
+  swap,
+  type Photo,
+  type Settings,
   type Transform,
-  type Rect,
-} from "./layout";
-import {
-  gestureTransform,
-  metrics,
-  minimumZoom,
-  normalizeAngle,
-  type GestureMetrics,
-} from "./transform";
-type Photo = { id: string; image: HTMLImageElement; url: string; t: Transform };
-function draw(
-  ctx: CanvasRenderingContext2D,
-  size: number,
-  photos: (Photo | null)[],
-  rects: Rect[],
-  bg: string,
-  radius: number,
-) {
-  ctx.fillStyle = bg;
-  ctx.fillRect(0, 0, size, size);
-  photos.forEach((p, i) => {
-    const r = rects[i];
-    if (!r || !p) return;
-    const g = geometry(p.image.naturalWidth, p.image.naturalHeight, r, p.t);
-    ctx.save();
-    ctx.beginPath();
-    ctx.roundRect(
-      r.x * size,
-      r.y * size,
-      r.w * size,
-      r.h * size,
-      Math.min(radius, r.w / 2, r.h / 2) * size,
-    );
-    ctx.clip();
-    ctx.translate(
-      (r.x + r.w / 2 + p.t.x) * size,
-      (r.y + r.h / 2 + p.t.y) * size,
-    );
-    ctx.rotate((p.t.rotation * Math.PI) / 180);
-    ctx.drawImage(
-      p.image,
-      (-g.w * size) / 2,
-      (-g.h * size) / 2,
-      g.w * size,
-      g.h * size,
-    );
-    ctx.restore();
-  });
+  type Layout,
+} from "./model";
+import { loadPhoto, dispose } from "./photos";
+import { encode } from "./render";
+const defaults: Settings = {
+  background: "#ffffff",
+  margin: 3,
+  gap: 3,
+  radius: 0,
+};
+function LayoutIcon({ layout }: { layout: Layout }) {
+  return (
+    <svg viewBox="0 0 48 48" aria-hidden="true">
+      {layout.cells.map((r, i) => (
+        <rect
+          key={i}
+          x={r.x * 44 + 2}
+          y={r.y * 44 + 2}
+          width={r.w * 44 - 3}
+          height={r.h * 44 - 3}
+          rx="2"
+        />
+      ))}
+    </svg>
+  );
+}
+function Slider({
+  label,
+  value,
+  min = 0,
+  max,
+  step = 1,
+  onChange,
+  unit = "",
+}: {
+  label: string;
+  value: number;
+  min?: number;
+  max: number;
+  step?: number;
+  onChange: (v: number) => void;
+  unit?: string;
+}) {
+  return (
+    <label className="slider">
+      <span>{label}</span>
+      <input
+        aria-label={label}
+        type="range"
+        min={min}
+        max={max}
+        step={step}
+        value={value}
+        onChange={(e) => onChange(+e.target.value)}
+      />
+      <output>
+        {Math.round(value * 100) / 100}
+        {unit}
+      </output>
+    </label>
+  );
 }
 export default function App() {
-  const [photos, commitPhotos] = useState<(Photo | null)[]>(
-      Array(5).fill(null),
-    ),
-    [count, setCount] = useState(2),
-    [tab, setTab] = useState("layout"),
-    [layoutId, setLayoutId] = useState(""),
-    [gap, setGap] = useState(0.012),
-    [radius, setRadius] = useState(0),
-    [bg, setBg] = useState("#ffffff"),
+  const [photos, setPhotos] = useState<(Photo | null)[]>([null, null]),
+    [layoutId, setLayoutId] = useState("2tb"),
     [selected, setSelected] = useState(0),
-    [error, setError] = useState(""),
+    [settings, setSettings] = useState(defaults),
+    [tab, setTab] = useState("layout"),
     [busy, setBusy] = useState(false),
-    [sharing, setSharing] = useState(false),
-    [gestureActive, setGestureActive] = useState(false),
-    [saveNotice, setSaveNotice] = useState(""),
+    [active, setActive] = useState(false),
+    [error, setError] = useState(""),
     [retry, setRetry] = useState(0),
-    [prepared, setPrepared] = useState<{ revision: object; file: File } | null>(
-      null,
-    ),
-    [loading, setLoading] = useState(false),
-    [result, setResult] = useState<{ url: string; file: File } | null>(null);
-  const canvas = useRef<HTMLCanvasElement>(null),
-    input = useRef<HTMLInputElement>(null),
-    replacement = useRef<number | null>(null),
+    [sharing, setSharing] = useState(false),
+    [saveOpen, setSaveOpen] = useState(false),
+    [notice, setNotice] = useState(""),
+    [result, setResult] = useState<{
+      file: File;
+      url: string;
+    } | null>(null),
+    [confirm, setConfirm] = useState<"new" | "batch" | null>(null),
+    [swapMode, setSwapMode] = useState(false),
+    [prepared, setPrepared] = useState<{
+      revision: object;
+      file: File;
+    } | null>(null);
+  const batch = useRef<HTMLInputElement>(null),
+    single = useRef<HTMLInputElement>(null),
+    target = useRef(0),
     photoRef = useRef(photos),
     resultRef = useRef(result);
+  photoRef.current = photos;
   resultRef.current = result;
-  const pointers = useRef(new Map<number, { x: number; y: number }>());
-  const gesture = useRef<{
-    index: number;
-    t: Transform;
-    metrics: GestureMetrics;
-  } | null>(null);
-  const frame = useRef<number | null>(null);
-  const suppressEmptyTap = useRef(false);
-  const choices = layouts[count] ?? [],
-    layout = choices.find((l) => l.id === layoutId) ?? choices[0],
-    rects = layout ? rectangles(layout, gap) : [];
-  const selectedPhoto = photos[selected];
-  const minZoom = selectedPhoto
-    ? minimumZoom(
-        selectedPhoto.image.naturalWidth,
-        selectedPhoto.image.naturalHeight,
-        rects[selected],
-      )
-    : 0.05;
-  const complete = photos.slice(0, count).every(Boolean);
-  const hiddenCount = photos.slice(count).filter(Boolean).length;
-  // A different revision immediately makes an older JPEG ineligible for sharing.
+  const count = photos.length,
+    layout = layouts[count].find((l) => l.id === layoutId) ?? layouts[count][0],
+    hasPhotos = photos.some(Boolean),
+    complete = photos.every(Boolean),
+    photo = photos[selected];
   const revision = useMemo(
-    () => ({}),
-    [photos, count, layoutId, gap, radius, bg],
+    () => ({ photos, layout, settings }),
+    [photos, layout, settings],
   );
-  const ready = prepared?.revision === revision;
-  useEffect(() => {
-    let cancelled = false;
-    setPrepared(null);
-    if (!complete) {
-      setBusy(false);
-      return;
-    }
-    setBusy(true);
-    if (gestureActive) return;
-    // Debounce editing; never encode inside the save button's user gesture.
-    const timer = window.setTimeout(() => {
-      try {
-        const c = document.createElement("canvas");
-        c.width = c.height = 2000;
-        draw(c.getContext("2d")!, 2000, photos, rects, bg, radius);
-        c.toBlob(
-          (blob) => {
-            if (cancelled) return;
-            if (blob) {
-              setPrepared({
-                revision,
-                file: new File([blob], `shuppin-photo-${Date.now()}.jpg`, {
-                  type: "image/jpeg",
-                }),
-              });
-              setSaveNotice("");
-            } else {
-              setSaveNotice(
-                "画像を作成できませんでした。編集内容は残っています。もう一度お試しください。",
-              );
-            }
-            setBusy(false);
-          },
-          "image/jpeg",
-          0.95,
-        );
-      } catch {
-        if (!cancelled) {
-          setSaveNotice(
-            "画像を作成できませんでした。編集内容は残っています。もう一度お試しください。",
-          );
-          setBusy(false);
-        }
-      }
-    }, 180);
-    return () => {
-      cancelled = true;
-      window.clearTimeout(timer);
-    };
-  }, [revision, retry, gestureActive]);
-  useLayoutEffect(() => {
-    const c = canvas.current;
-    if (c) draw(c.getContext("2d")!, 1000, photos, rects, bg, radius);
-  }, [photos, count, layoutId, gap, radius, bg]);
   useEffect(
     () => () => {
-      if (frame.current !== null) cancelAnimationFrame(frame.current);
-      photoRef.current.forEach((p) => {
-        if (p) URL.revokeObjectURL(p.url);
-      });
+      photoRef.current.forEach(dispose);
       if (resultRef.current) URL.revokeObjectURL(resultRef.current.url);
     },
     [],
   );
-  function invalidate() {
-    setResult((old) => {
-      if (old) URL.revokeObjectURL(old.url);
-      return null;
-    });
-  }
-  function setPhotos(
-    update: (Photo | null)[] | ((old: (Photo | null)[]) => (Photo | null)[]),
-  ) {
-    const next =
-      typeof update === "function" ? update(photoRef.current) : update;
-    photoRef.current = next;
-    commitPhotos(next);
-  }
-  function updateTransform(index: number, t: Transform, immediate = false) {
-    invalidate();
-    photoRef.current = photoRef.current.map((p, i) =>
-      i === index && p ? { ...p, t } : p,
-    );
-    if (immediate) {
-      flushFrame();
-      return;
-    }
-    if (frame.current === null)
-      frame.current = requestAnimationFrame(() => {
-        frame.current = null;
-        setPhotos(photoRef.current);
-      });
-  }
-  function flushFrame() {
-    if (frame.current !== null) cancelAnimationFrame(frame.current);
-    frame.current = null;
-    setPhotos(photoRef.current);
-  }
-  function transform(t: Transform) {
-    stopGesture();
-    updateTransform(selected, t, true);
-  }
-  async function load(files: FileList | null) {
-    if (!files?.length) return;
-    const index = replacement.current;
-    replacement.current = null;
-    const list = Array.from(files);
-    if (
-      index === null
-        ? photos.filter(Boolean).length + list.length > 5
-        : list.length !== 1
-    ) {
-      setError("写真は合計5枚まで。差し替えは1枚選んでください。");
-      return;
-    }
-    setLoading(true);
-    setError("");
-    const added: Photo[] = [];
-    try {
-      for (const file of list) {
-        if (!file.type.startsWith("image/"))
-          throw Error("画像ファイルを選んでください。");
-        const url = URL.createObjectURL(file);
-        try {
-          const image = new Image();
-          image.src = url;
-          await image.decode();
-          added.push({
-            id: crypto.randomUUID(),
-            image,
-            url,
-            t: initialTransform(),
-          });
-        } catch {
-          URL.revokeObjectURL(url);
-          throw Error(
-            "読み込めない写真があります。JPEG・PNG形式でお試しください。",
-          );
-        }
-      }
-      invalidate();
-      const next = [...photos];
-      let first = index ?? next.findIndex((p) => !p);
-      if (index !== null) {
-        if (next[index]) URL.revokeObjectURL(next[index]!.url);
-        next[index] = added[0];
-      } else {
-        for (const photo of added) next[next.findIndex((p) => !p)] = photo;
-        const last = next.reduce((last, p, i) => (p ? i : last), 1);
-        setCount(Math.max(count, last + 1));
-      }
-      setPhotos(next);
-      setSelected(first);
-    } catch (e) {
-      added.forEach((p) => URL.revokeObjectURL(p.url));
-      setError((e as Error).message);
-    } finally {
-      setLoading(false);
-      if (input.current) input.current.value = "";
-    }
-  }
-  function pick(index: number | null) {
-    stopGesture();
-    replacement.current = index;
-    if (input.current) {
-      input.current.multiple = index === null;
-      input.current.click();
-    }
-  }
-  function move(delta: number) {
-    stopGesture();
-    const target = selected + delta;
-    if (target < 0 || target >= count) return;
-    invalidate();
-    setPhotos((old) => {
-      const next = [...old];
-      [next[selected], next[target]] = [next[target], next[selected]];
-      return next;
-    });
-    setSelected(target);
-  }
-  function begin(index: number) {
-    gesture.current = {
-      index,
-      t: { ...photoRef.current[index]!.t },
-      metrics: metrics([...pointers.current.values()]),
+  useEffect(() => {
+    let cancelled = false;
+    setPrepared(null);
+    if (!complete || busy || active) return;
+    const timer = setTimeout(() => {
+      encode(photos, layout, settings)
+        .then((file) => {
+          if (!cancelled) setPrepared({ revision, file });
+        })
+        .catch((e) => {
+          if (!cancelled) setError(e.message + "「再作成」で試してください。");
+        });
+    }, 180);
+    return () => {
+      cancelled = true;
+      clearTimeout(timer);
     };
+  }, [revision, active, busy, retry]);
+  useEffect(() => {
+    const unload = (e: BeforeUnloadEvent) => {
+      if (photoRef.current.some(Boolean)) {
+        e.preventDefault();
+        e.returnValue = "";
+      }
+    };
+    window.addEventListener("beforeunload", unload);
+    return () => window.removeEventListener("beforeunload", unload);
+  }, []);
+  function chooseBatch() {
+    if (hasPhotos) setConfirm("batch");
+    else batch.current?.click();
   }
-  function releasePointer(id: number) {
-    if (!pointers.current.delete(id)) return;
-    flushFrame();
-    if (pointers.current.size && gesture.current) begin(gesture.current.index);
-    else {
-      gesture.current = null;
-      setGestureActive(false);
+  function select(n: number) {
+    if (swapMode) {
+      setPhotos((ps) => swap(ps, selected, n));
+      setSwapMode(false);
     }
+    setSelected(n);
   }
-  function stopGesture() {
-    flushFrame();
-    pointers.current.clear();
-    gesture.current = null;
-    setGestureActive(false);
+  function edit(t: Partial<Transform>) {
+    setPhotos((ps) =>
+      ps.map((p, i) =>
+        p && i === selected ? { ...p, t: { ...p.t, ...t } } : p,
+      ),
+    );
   }
-  function canShare(file: File) {
+  async function read(files: FileList | null, isBatch: boolean) {
+    if (!files?.length) return;
+    const fs = Array.from(files);
+    if (isBatch && (fs.length < 2 || fs.length > 5)) {
+      setError("写真は2〜5枚まとめて選んでください（最大5枚）。");
+      return;
+    }
+    setBusy(true);
+    setError("");
+    const next: Photo[] = [];
     try {
-      return (
-        typeof navigator.share === "function" &&
-        typeof navigator.canShare === "function" &&
-        navigator.canShare({ files: [file] })
-      );
-    } catch {
-      return false;
+      for (const f of fs) next.push(await loadPhoto(f));
+      if (isBatch) {
+        photoRef.current.forEach(dispose);
+        setPhotos(next);
+        setLayoutId(layouts[next.length][0].id);
+        setSelected(0);
+      } else {
+        const i = target.current;
+        dispose(photoRef.current[i]);
+        setPhotos((ps) => ps.map((p, j) => (j === i ? next[0] : p)));
+        setSelected(i);
+      }
+      setSwapMode(false);
+    } catch (e) {
+      next.forEach(dispose);
+      setError(e instanceof Error ? e.message : "写真を読み込めませんでした。");
+    } finally {
+      setBusy(false);
     }
+  }
+  function pickSingle(i: number) {
+    target.current = i;
+    single.current?.click();
+  }
+  function showResult(file: File) {
+    if (result) URL.revokeObjectURL(result.url);
+    setResult({ file, url: URL.createObjectURL(file) });
+    setSaveOpen(true);
+  }
+  function share(file: File) {
+    setSharing(true);
+    setNotice("");
+    let promise: Promise<void>;
+    try {
+      if (!navigator.canShare?.({ files: [file] }) || !navigator.share) {
+        setNotice(
+          "完成画像を長押しして「写真に保存」、またはJPEGをダウンロードしてください。",
+        );
+        setSharing(false);
+        return;
+      }
+      promise = navigator.share({ files: [file] });
+    } catch {
+      setNotice(
+        "共有を開けませんでした。画像の長押し保存かダウンロードをお試しください。",
+      );
+      setSharing(false);
+      return;
+    }
+    promise
+      .then(() =>
+        setNotice("共有画面を閉じました。必要に応じてもう一度保存できます。"),
+      )
+      .catch((e) =>
+        setNotice(
+          e?.name === "AbortError"
+            ? "共有をキャンセルしました。完成画像は残っています。"
+            : "共有に失敗しました。再試行、または画像の長押し保存ができます。",
+        ),
+      )
+      .finally(() => setSharing(false));
   }
   function save() {
-    if (sharing || pointers.current.size) return;
-    if (!ready || !prepared) {
-      setRetry((n) => n + 1);
-      return;
-    }
+    if (!prepared || prepared.revision !== revision || sharing) return;
     const file = prepared.file;
-    // Keep a separately owned preview URL until the user closes/edits it.
-    if (resultRef.current) URL.revokeObjectURL(resultRef.current.url);
-    const next = { file, url: URL.createObjectURL(file) };
-    resultRef.current = next;
-    setResult(next);
-    setSaveNotice("");
-    if (canShare(file)) void share(file);
-    else
-      setSaveNotice(
-        "完成画像を長押しして保存、またはJPEGをダウンロードしてください。",
-      );
+    share(file);
+    showResult(file);
   }
-  async function share(file: File) {
-    if (sharing) return;
-    setSharing(true);
-    setSaveNotice("");
-    try {
-      // Call synchronously from the tap handler: no encoding/await before share.
-      await navigator.share({ files: [file] });
-      setSaveNotice(
-        "「画像を保存」が見つからない場合は、下の画像を長押しして保存してください。",
-      );
-    } catch (e) {
-      setSaveNotice(
-        (e as Error).name === "AbortError"
-          ? "共有を終了しました。画像は残っています。再共有、または長押しで保存できます。"
-          : "共有できませんでした。画像は残っています。再共有、または長押しで保存してください。",
-      );
-    } finally {
-      setSharing(false);
+  function confirmAction() {
+    const action = confirm;
+    setConfirm(null);
+    if (action === "batch") {
+      batch.current?.click();
+    } else {
+      photos.forEach(dispose);
+      setPhotos([null, null]);
+      setLayoutId("2tb");
+      setSelected(0);
+      setSettings(defaults);
+      setError("");
+      setSwapMode(false);
     }
-  }
-  function selectCount(next: number) {
-    setCount(next);
-    setSelected((i) => Math.min(i, next - 1));
-    stopGesture();
-    invalidate();
   }
   return (
-    <div className="editor">
-      <header className="toolbar">
-        <a className="brand" href="./">
-          <span className="brand-mark">▦</span> 出品フォト
-        </a>
-        <span className="output-label">2000 × 2000</span>
+    <main className="app">
+      <header>
         <button
-          className="primary save-button"
-          disabled={!complete || busy || loading || sharing || gestureActive}
-          onClick={save}
+          className="new-button"
+          aria-label="新規作成"
+          onClick={() => (hasPhotos ? setConfirm("new") : undefined)}
         >
-          {busy ? "準備中…" : complete && !ready ? "再試行" : "保存"}
+          ＋<span>新規</span>
+        </button>
+        <h1>
+          出品フォト<span className="version">1.0</span>
+        </h1>
+        <button
+          className="save primary"
+          aria-label="保存"
+          onClick={save}
+          disabled={
+            !prepared ||
+            prepared.revision !== revision ||
+            busy ||
+            active ||
+            sharing
+          }
+        >
+          <svg aria-hidden="true" viewBox="0 0 20 20" width="16" height="16">
+            <path
+              d="M10 13V2m-4 4 4-4 4 4M3 12v5h14v-5"
+              fill="none"
+              stroke="currentColor"
+              strokeWidth="1.5"
+              strokeLinecap="round"
+              strokeLinejoin="round"
+            />
+          </svg>
+          {complete
+            ? prepared?.revision === revision
+              ? "保存"
+              : "準備中"
+            : "保存"}
         </button>
       </header>
-      <main className="stage">
-        <div
-          className="canvas-area"
-          onPointerDown={(e) => {
-            if (pointers.current.size >= 2 || loading) return;
-            const b = e.currentTarget.getBoundingClientRect();
-            const point = {
-              x: (e.clientX - b.left) / b.width,
-              y: (e.clientY - b.top) / b.height,
-            };
-            let index = gesture.current?.index;
-            if (index === undefined) {
-              suppressEmptyTap.current = false;
-              index = rects.findIndex(
-                (r) =>
-                  point.x >= r.x &&
-                  point.x <= r.x + r.w &&
-                  point.y >= r.y &&
-                  point.y <= r.y + r.h,
-              );
-              if (index < 0 || !photoRef.current[index]) return;
-            } else suppressEmptyTap.current = true;
-            e.preventDefault();
-            e.currentTarget.setPointerCapture(e.pointerId);
-            pointers.current.set(e.pointerId, point);
-            setGestureActive(true);
-            setSelected(index);
-            begin(index);
-          }}
-          onPointerMove={(e) => {
-            const g = gesture.current;
-            if (!pointers.current.has(e.pointerId) || !g) return;
-            e.preventDefault();
-            const b = e.currentTarget.getBoundingClientRect();
-            pointers.current.set(e.pointerId, {
-              x: (e.clientX - b.left) / b.width,
-              y: (e.clientY - b.top) / b.height,
-            });
-            const p = photoRef.current[g.index]!,
-              r = rects[g.index];
-            updateTransform(
-              g.index,
-              gestureTransform(
-                g.t,
-                g.metrics,
-                metrics([...pointers.current.values()]),
-                r,
-                minimumZoom(p.image.naturalWidth, p.image.naturalHeight, r),
-              ),
-            );
-          }}
-          onPointerUp={(e) => releasePointer(e.pointerId)}
-          onPointerCancel={(e) => releasePointer(e.pointerId)}
-          onLostPointerCapture={(e) => releasePointer(e.pointerId)}
-        >
-          <canvas
-            ref={canvas}
-            aria-label="結合写真プレビュー。指で移動、2本指で拡大縮小・回転"
-            width="1000"
-            height="1000"
-          />
-          <div className="slot-overlays">
-            {rects.map((r, i) => (
-              <div
-                key={i}
-                className={`slot ${selected === i && photos[i] ? "selected" : ""}`}
-                style={{
-                  left: `${r.x * 100}%`,
-                  top: `${r.y * 100}%`,
-                  width: `${r.w * 100}%`,
-                  height: `${r.h * 100}%`,
-                }}
-              >
-                {photos[i] ? (
-                  <span className="slot-number">{i + 1}</span>
-                ) : (
-                  <button
-                    className="empty-slot"
-                    disabled={loading}
-                    aria-label={`枠${i + 1}に写真を追加`}
-                    onClick={() => {
-                      if (!suppressEmptyTap.current) pick(i);
-                    }}
-                  >
-                    <span>＋</span>
-                    <small>写真を追加</small>
-                  </button>
-                )}
-              </div>
-            ))}
-          </div>
-        </div>
-        <div className="stage-caption">
+      <div className="workspace">
+        <div className="canvas-meta">
           <span>
-            {photos[selected]
-              ? `写真 ${selected + 1} を編集中`
-              : "空いている枠をタップ"}
+            <i />{" "}
+            {hasPhotos
+              ? "写真をタップして調整"
+              : "写真を選んで、すぐコラージュ"}
           </span>
-          <button
-            className="replace-button"
-            disabled={loading}
-            onClick={() => pick(selected)}
-          >
-            {photos[selected] ? "写真を差し替え" : "この枠に追加"}
-          </button>
+          <span>1 : 1</span>
         </div>
-        <p className="gesture-hint">ドラッグで移動 · 2本指で拡大縮小・回転</p>
-        {error && (
-          <p className="notice error" role="alert">
-            {error}
-            <button aria-label="エラーを閉じる" onClick={() => setError("")}>
-              ×
-            </button>
-          </p>
-        )}
-        {!result && saveNotice && (
-          <p className="notice" role="status">
-            {saveNotice}
-          </p>
-        )}
-      </main>
-      <input
-        ref={input}
-        type="file"
-        accept="image/*"
-        multiple
-        hidden
-        onChange={(e) => void load(e.target.files)}
-      />
-      <section className="dock" aria-label="編集メニュー">
-        <div className="count-bar">
-          <span>写真の枚数</span>
-          <div className="count-options">
-            {[2, 3, 4, 5].map((n) => (
-              <button
-                key={n}
-                aria-pressed={count === n}
-                disabled={loading}
-                onClick={() => selectCount(n)}
-              >
-                {n}枚
+        <section className="stage" aria-label="編集エリア">
+          <EditorCanvas
+            photos={photos}
+            layout={layout}
+            settings={settings}
+            selected={selected}
+            selectOnly={swapMode}
+            onSwap={(source, target) => {
+              setPhotos((ps) => swap(ps, source, target));
+              setSelected(target);
+              setSwapMode(false);
+            }}
+            onSelect={select}
+            onEmpty={pickSingle}
+            onGesture={setActive}
+            onTransform={(i, t) =>
+              setPhotos((ps) =>
+                ps.map((p, j) => (p && i === j ? { ...p, t } : p)),
+              )
+            }
+          />
+          {!hasPhotos && (
+            <div className="welcome">
+              <div className="collage-mark">
+                <span />
+                <span />
+                <span />
+              </div>
+              <h2>ぱっと、ひとまとめ。</h2>
+              <p>
+                出品写真を選ぶだけ。
+                <br />
+                ちょうどいい1枚に。
+              </p>
+              <button className="primary choose" onClick={chooseBatch}>
+                ＋ 写真を選ぶ
               </button>
-            ))}
-          </div>
-          <button
-            className="batch-add"
-            onClick={() => pick(null)}
-            disabled={loading || photos.every(Boolean)}
-            aria-label="写真をまとめて追加"
-          >
-            ＋ まとめて
-          </button>
+              <small>2〜5枚をまとめて選択</small>
+            </div>
+          )}
+          {busy && (
+            <div className="loading" role="status">
+              写真を読み込み中…
+            </div>
+          )}
+        </section>
+        <div className="under-canvas">
+          <span>
+            {hasPhotos
+              ? swapMode
+                ? "入れ替え先の写真をタップ"
+                : "ドラッグで移動 · 長押しで入れ替え"
+              : "画像は端末内だけで処理します"}
+          </span>
+          <span className="resolution">2000px JPEG</span>
+        </div>
+      </div>
+      <section className="tools">
+        <div className="tabs" role="tablist" aria-label="編集メニュー">
+          {[
+            ["layout", "▦", "レイアウト"],
+            ["space", "▣", "余白"],
+            ["adjust", "☷", "調整"],
+          ].map(([id, icon, name]) => (
+            <button
+              role="tab"
+              aria-selected={tab === id}
+              key={id}
+              onClick={() => setTab(id)}
+            >
+              <b aria-hidden="true">{icon}</b>
+              {name}
+            </button>
+          ))}
         </div>
         <div
-          className="tool-panel"
+          className="tool-content"
           role="tabpanel"
-          id={`panel-${tab}`}
-          aria-labelledby={`tab-${tab}`}
+          aria-label={
+            tab === "layout" ? "レイアウト" : tab === "space" ? "余白" : "調整"
+          }
         >
           {tab === "layout" && (
             <>
-              <div className="panel-heading">
-                <span>レイアウトを選択</span>
-                <small>
-                  {hiddenCount
-                    ? `枠の外に${hiddenCount}枚保持中`
-                    : "写真は端末内だけで処理"}
-                </small>
+              <div className="tool-heading">
+                <strong>レイアウト</strong>
+                <span>{count}枚の写真にぴったり</span>
               </div>
-              <div className="layouts">
-                {choices.map((l) => (
+              <div className="layout-list">
+                {layouts[count].map((l) => (
                   <button
                     key={l.id}
-                    className={layout.id === l.id ? "chosen" : ""}
-                    aria-pressed={layout.id === l.id}
-                    onClick={() => {
-                      setLayoutId(l.id);
-                      stopGesture();
-                      invalidate();
-                    }}
+                    aria-label={l.name}
+                    aria-pressed={l.id === layout.id}
+                    className={
+                      "layout-choice " + (l.id === layout.id ? "chosen" : "")
+                    }
+                    onClick={() => setLayoutId(l.id)}
                   >
-                    <svg viewBox="0 0 60 60" aria-hidden="true">
-                      {rectangles(l, 0.045).map((r, i) => (
-                        <rect
-                          key={i}
-                          x={r.x * 60}
-                          y={r.y * 60}
-                          width={r.w * 60}
-                          height={r.h * 60}
-                          rx="2"
-                        />
-                      ))}
-                    </svg>
+                    <LayoutIcon layout={l} />
                     <span>{l.name}</span>
                   </button>
                 ))}
               </div>
+              <p className="tool-note">
+                配置を変えても、写真の調整はそのまま。
+              </p>
             </>
           )}
-          {tab === "border" && (
+          {tab === "space" && (
             <>
-              <div className="background">
-                <span>背景</span>
-                <div>
-                  {[
-                    ["#ffffff", "白"],
-                    ["#222222", "黒"],
-                    ["#d5d5d5", "グレー"],
-                  ].map(([color, name]) => (
-                    <button
-                      key={color}
-                      aria-pressed={bg === color}
-                      onClick={() => {
-                        setBg(color);
-                        invalidate();
-                      }}
-                    >
-                      <i style={{ background: color }} />
-                      {name}
-                    </button>
-                  ))}
-                </div>
+              <div className="colors">
+                <strong>背景</strong>
+                {[
+                  ["白", "#ffffff"],
+                  ["黒", "#171717"],
+                  ["グレー", "#d5d5d5"],
+                ].map(([name, color]) => (
+                  <button
+                    key={name}
+                    aria-pressed={settings.background === color}
+                    onClick={() =>
+                      setSettings((s) => ({ ...s, background: color }))
+                    }
+                  >
+                    <i style={{ background: color }} />
+                    {name}
+                  </button>
+                ))}
               </div>
-              <label className="slider">
-                余白
-                <input
-                  type="range"
-                  min="0"
-                  max=".04"
-                  step=".002"
-                  value={gap}
-                  onChange={(e) => {
-                    setGap(+e.target.value);
-                    invalidate();
-                  }}
-                />
-                <span>{Math.round(gap * 2000)}px</span>
-              </label>
-              <label className="slider">
-                角丸
-                <input
-                  type="range"
-                  min="0"
-                  max=".05"
-                  step=".002"
-                  value={radius}
-                  onChange={(e) => {
-                    setRadius(+e.target.value);
-                    invalidate();
-                  }}
-                />
-                <span>{Math.round(radius * 2000)}px</span>
-              </label>
+              <Slider
+                label="外側の余白"
+                value={settings.margin}
+                max={20}
+                unit="px"
+                onChange={(margin) => setSettings((s) => ({ ...s, margin }))}
+              />
+              <Slider
+                label="枠の隙間"
+                value={settings.gap}
+                max={20}
+                unit="px"
+                onChange={(gap) => setSettings((s) => ({ ...s, gap }))}
+              />
+              <Slider
+                label="角丸"
+                value={settings.radius}
+                max={30}
+                unit="px"
+                onChange={(radius) => setSettings((s) => ({ ...s, radius }))}
+              />
             </>
           )}
           {tab === "adjust" && (
             <>
-              <div className="photos">
-                {photos.slice(0, count).map((p, i) => (
+              <div className="photo-strip">
+                {photos.map((p, i) => (
                   <button
                     key={i}
-                    className={`thumb ${selected === i ? "selected" : ""}`}
                     aria-label={`写真${i + 1}を選択`}
-                    onClick={() => {
-                      stopGesture();
-                      setSelected(i);
-                    }}
+                    aria-pressed={selected === i}
+                    onClick={() => select(i)}
+                    className={selected === i ? "chosen" : ""}
                   >
-                    {p ? (
-                      <img src={p.url} alt={`選択した写真 ${i + 1}`} />
-                    ) : (
-                      <span>＋</span>
-                    )}
-                    <b>{i + 1}</b>
+                    {i + 1}
+                    {!p && " ＋"}
                   </button>
                 ))}
+                <span>
+                  {swapMode ? "入れ替え先を選択" : `写真${selected + 1}を調整`}
+                </span>
               </div>
-              <label className="slider">
-                拡大
-                <input
-                  type="range"
-                  aria-label="拡大"
-                  min={minZoom}
-                  max="6"
-                  step="any"
-                  disabled={!photos[selected]}
-                  value={photos[selected]?.t.zoom ?? 1}
-                  onChange={(e) =>
-                    transform({ ...photos[selected]!.t, zoom: +e.target.value })
-                  }
-                />
-                <button
-                  disabled={!photos[selected]}
-                  onClick={() => transform(initialTransform())}
-                >
-                  リセット
-                </button>
-              </label>
-              <label className="slider">
-                回転
-                <input
-                  aria-label="回転角度"
-                  type="range"
-                  min="-180"
-                  max="180"
-                  step="1"
-                  disabled={!selectedPhoto}
-                  value={selectedPhoto?.t.rotation ?? 0}
-                  onChange={(e) =>
-                    transform({
-                      ...selectedPhoto!.t,
-                      rotation: +e.target.value,
-                    })
-                  }
-                />
-                <span>{Math.round(selectedPhoto?.t.rotation ?? 0)}°</span>
-                <button
-                  disabled={!selectedPhoto}
-                  onClick={() =>
-                    transform({
-                      ...selectedPhoto!.t,
-                      rotation: normalizeAngle(selectedPhoto!.t.rotation + 90),
-                    })
-                  }
-                >
-                  90°回転
-                </button>
-              </label>
-              <div className="photo-tools">
-                <span>写真 {selected + 1}</span>
-                <button
-                  onClick={() => move(-1)}
-                  disabled={selected === 0 || loading}
-                  aria-label="前に移動"
-                >
-                  ←
-                </button>
-                <button
-                  onClick={() => move(1)}
-                  disabled={selected === count - 1 || loading}
-                  aria-label="後ろに移動"
-                >
-                  →
-                </button>
-                <button
-                  disabled={!photos[selected] || loading}
-                  onClick={() => {
-                    stopGesture();
-                    invalidate();
-                    URL.revokeObjectURL(photos[selected]!.url);
-                    setPhotos((old) =>
-                      old.map((p, i) => (i === selected ? null : p)),
-                    );
-                  }}
-                >
-                  削除
-                </button>
-              </div>
+              {photo ? (
+                <>
+                  <Slider
+                    label="拡大率"
+                    value={photo.t.zoom}
+                    min={0.001}
+                    max={6}
+                    step={0.001}
+                    unit="×"
+                    onChange={(zoom) => edit({ zoom })}
+                  />
+                  <Slider
+                    label="回転角度"
+                    value={photo.t.angle}
+                    min={-180}
+                    max={180}
+                    step={0.1}
+                    unit="°"
+                    onChange={(angle) => edit({ angle })}
+                  />
+                  <div className="actions">
+                    <button
+                      onClick={() =>
+                        edit({ angle: ((photo.t.angle + 270) % 360) - 180 })
+                      }
+                    >
+                      90°回転
+                    </button>
+                    <button onClick={() => edit(initialTransform())}>
+                      リセット
+                    </button>
+                    <button
+                      aria-pressed={swapMode}
+                      onClick={() => setSwapMode(!swapMode)}
+                    >
+                      入れ替え
+                    </button>
+                    <button onClick={() => pickSingle(selected)}>
+                      差し替え
+                    </button>
+                    <button
+                      className="danger"
+                      onClick={() => {
+                        dispose(photo);
+                        setPhotos((ps) =>
+                          ps.map((p, i) => (i === selected ? null : p)),
+                        );
+                      }}
+                    >
+                      削除
+                    </button>
+                  </div>
+                </>
+              ) : (
+                <div className="add-slot">
+                  <button onClick={() => pickSingle(selected)}>
+                    ＋ この枠に写真を追加
+                  </button>
+                </div>
+              )}
             </>
           )}
         </div>
-        <nav className="tool-tabs" role="tablist" aria-label="編集ツール">
-          {[
-            ["layout", "▦", "レイアウト"],
-            ["border", "▣", "枠線・余白"],
-            ["adjust", "☷", "調整"],
-          ].map(([id, icon, name]) => (
-            <button
-              key={id}
-              role="tab"
-              id={`tab-${id}`}
-              aria-selected={tab === id}
-              aria-controls={`panel-${id}`}
-              onClick={() => setTab(id)}
-            >
-              <span aria-hidden="true">{icon}</span>
-              {name}
-            </button>
-          ))}
-        </nav>
       </section>
-      {result && (
+      <footer>
+        <button className="batch-button" disabled={busy} onClick={chooseBatch}>
+          ＋ {hasPhotos ? "写真をまとめて選び直す" : "写真を選ぶ"}
+          <small>2〜5枚</small>
+        </button>
+        <p>
+          広告なし <span>·</span> ログイン不要 <span>·</span> 外部送信なし
+        </p>
+      </footer>
+      {error && (
+        <div className="error" role="alert">
+          <span>{error}</span>
+          {complete && (
+            <button
+              onClick={() => {
+                setError("");
+                setRetry((n) => n + 1);
+              }}
+            >
+              再作成
+            </button>
+          )}
+          <button aria-label="案内を閉じる" onClick={() => setError("")}>
+            ×
+          </button>
+        </div>
+      )}
+      <input
+        ref={batch}
+        aria-label="写真をまとめて選択"
+        type="file"
+        accept="image/*,.heic,.heif"
+        multiple
+        hidden
+        onChange={(e) => {
+          void read(e.target.files, true);
+          e.target.value = "";
+        }}
+      />
+      <input
+        ref={single}
+        aria-label="写真を個別に選択"
+        type="file"
+        accept="image/*,.heic,.heif"
+        hidden
+        onChange={(e) => {
+          void read(e.target.files, false);
+          e.target.value = "";
+        }}
+      />
+      {confirm && (
         <div className="modal-backdrop">
           <section
-            className="modal"
-            role="dialog"
+            className="dialog"
+            role="alertdialog"
             aria-modal="true"
-            aria-label="画像を保存"
+            aria-labelledby="confirm-title"
           >
-            <button
-              className="close"
-              autoFocus
-              onClick={invalidate}
-              aria-label="閉じる"
-            >
-              ×
-            </button>
-            <h2>出品の準備ができました。</h2>
-            <p>2000 × 2000 px・JPEG</p>
-            <img
-              src={result.url}
-              alt="完成した結合写真。長押しで保存できます"
-            />
-            <p className="save-help">
-              共有画面で「画像を保存」を選んでください。
-              <br />
-              見つからない場合は、この画像を長押しして保存できます。
+            <h2 id="confirm-title">
+              {confirm === "new"
+                ? "新しく作成しますか？"
+                : "写真を選び直しますか？"}
+            </h2>
+            <p>
+              {confirm === "new"
+                ? "編集中の写真と調整内容を消去します。"
+                : "新しい写真を読み込めた後に、現在の写真と調整内容を置き換えます。選択をキャンセルすると編集は残ります。"}
             </p>
-            {saveNotice && (
-              <p className="save-notice" role="status">
-                {saveNotice}
-              </p>
-            )}
-            {canShare(result.file) && (
-              <button
-                className="primary"
-                disabled={sharing}
-                onClick={() => void share(result.file)}
-              >
-                {sharing ? "共有中…" : "もう一度共有する"}
-              </button>
-            )}
-            <a
-              className="download"
-              href={result.url}
-              download={result.file.name}
-            >
-              JPEGをダウンロード
-            </a>
-            <small>
-              iPhoneは共有メニューの「画像を保存」、
-              <br />
-              または画像を長押しして保存できます。
-            </small>
-            <button className="text-button" onClick={invalidate}>
-              編集に戻る
+            <button className="primary" autoFocus onClick={confirmAction}>
+              {confirm === "new" ? "新しく作成" : "写真を選び直す"}
             </button>
+            <button onClick={() => setConfirm(null)}>編集を続ける</button>
           </section>
         </div>
       )}
-    </div>
+      {saveOpen && result && (
+        <div className="modal-backdrop">
+          <section
+            className="dialog result"
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="result-title"
+          >
+            <h2 id="result-title">完成しました</h2>
+            <p>2000 × 2000px · 高画質JPEG</p>
+            <img
+              src={result.url}
+              alt="保存用の完成画像。長押しで保存できます"
+            />
+            <p role="status">
+              {notice || "共有画面の「画像を保存」を選んでください。"}
+            </p>
+            <button
+              className="primary"
+              disabled={sharing}
+              onClick={() => share(result.file)}
+            >
+              もう一度共有する
+            </button>
+            <a href={result.url} download="shuppin-photo.jpg">
+              JPEGをダウンロード
+            </a>
+            <button onClick={() => setSaveOpen(false)}>編集に戻る</button>
+          </section>
+        </div>
+      )}
+    </main>
   );
 }
