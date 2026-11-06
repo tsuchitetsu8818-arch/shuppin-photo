@@ -313,6 +313,12 @@ export default function App() {
             layout={layout}
             settings={settings}
             selected={selected}
+            selectOnly={swapMode}
+            onSwap={(source, target) => {
+              setPhotos((ps) => swap(ps, source, target));
+              setSelected(target);
+              setSwapMode(false);
+            }}
             onSelect={select}
             onEmpty={pickSingle}
             onGesture={setActive}
@@ -352,7 +358,7 @@ export default function App() {
             {hasPhotos
               ? swapMode
                 ? "入れ替え先の写真をタップ"
-                : "ドラッグで移動 · 2本指で拡大・回転"
+                : "ドラッグで移動 · 長押しで入れ替え"
               : "画像は端末内だけで処理します"}
           </span>
           <span className="resolution">2000px JPEG</span>
